@@ -722,7 +722,8 @@ class BasicClient:
                 self.auth.account_id,
                 priority=priority
             ),
-            self.http.account_graphql_get_clients_external_auths(
+            self.http.account_get_multiple_by_user_id(
+                [self.auth.account_id],
                 priority=priority
             ),
             self.http.account_get_external_auths_by_id(
@@ -732,7 +733,7 @@ class BasicClient:
         ]
 
         data, ext_data, extra_ext_data, *_ = await asyncio.gather(*tasks)
-        data['externalAuths'] = ext_data['myAccount']['externalAuths'] or []
+        data['externalAuths'] = ext_data[0]['externalAuths'] or []
         data['extraExternalAuths'] = extra_ext_data
         self.user = ClientUser(self, data)
 
@@ -995,7 +996,8 @@ class BasicClient:
                     pass
 
         try:
-            data = await self.http.account_get_by_display_name(display_name)
+            lookup = await self.http.account_get_by_display_name(display_name)
+            data = await self.http.account_get_multiple_by_user_id([lookup.get('id')])
         except HTTPException as e:
             error_code = 'errors.com.epicgames.account.account_not_found'
             if e.message_code == error_code:
@@ -1003,8 +1005,8 @@ class BasicClient:
             raise
 
         if raw:
-            return data
-        return self.store_user(data, try_cache=cache)
+            return data[0]
+        return self.store_user(data[0], try_cache=cache)
 
     async def fetch_users_by_display_name(self, display_name: str, *,
                                           raw: bool = False
