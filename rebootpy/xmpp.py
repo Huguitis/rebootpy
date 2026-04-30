@@ -59,7 +59,9 @@ _member_meta_attrs = ('ready', 'input', 'outfit',
                       'outfit_variants', 'backpack_variants',
                       'pickaxe_variants', 'contrail_variants',
                       'lobby_map_marker_is_visible',
-                      'lobby_map_marker_coordinates', 'playlist_selection',)
+                      'lobby_map_marker_coordinates', 'playlist_selection',
+                      'matchmaking_info', 'sidekick', 'sidekick_variants',
+                      'jam',)
 
 
 def is_RandALCat(c: str) -> bool:
@@ -933,7 +935,7 @@ class XMPPClient:
 
         def _dispatch(key, member, pre_value, value):
             self.client.dispatch_event(
-                'party_member_{0}_change'.format(key),
+                f'party_member_{key}_change',
                 member,
                 pre_value,
                 value
