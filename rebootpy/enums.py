@@ -372,13 +372,15 @@ class RankingType(Enum):
     BATTLE_ROYALE_LEGACY    = 'ranked-br'
     ZERO_BUILD              = 'ranked-zb'
     ROCKET_RACING           = 'delmar-competitive'
-    RELOAD                  = 'ranked_blastberry_build'
+    RELOAD_LEGACY           = 'ranked_blastberry_build'
     RELOAD_ZB               = 'ranked_blastberry_nobuild'
     BALLISTIC               = 'ranked-feral'
     OG                      = 'ranked-figment-build'
     OG_ZERO_BUILD           = 'ranked-figment-nobuild'
     CROWN_JAM               = 'ranked-pimlico'
     BATTLE_ROYALE           = 'ranked-br-combined'
+    ARENAS_BOXFIGHTS        = 'ranked-squareclub'
+    RELOAD                  = 'ranked-blastberry-combined'
 
 
 class Rank(Enum):
