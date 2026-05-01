@@ -6,6 +6,14 @@ Changelog
 Detailed version changes.
 You can also view the changelog of the original library, fortnitepy, `here <https://fortnitepy.readthedocs.io/en/latest/changelog.html>`_.
 
+v1.1.0 (pre-release)
+------
+
+Bug Fixes
+~~~~~
+
+- Fixed issue where public parties didn't appear public.
+
 v1.0.3
 ------
 
