@@ -1760,8 +1760,6 @@ class HTTPClient:
                                  status='',
                                  **kwargs: Any,
                                  ) -> Any:
-        print(f'Sending "{status}" from chat_send_presence')
-
         payload = {
             "status": "online",
             "activity": {
