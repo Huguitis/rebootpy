@@ -269,6 +269,7 @@ class XMPPClient:
         self.xml_processor = XMLProcessor()
 
         self.stanza = "<presence/>"
+        self.status = ""
 
     @property
     def resource(self) -> str:
@@ -1214,8 +1215,8 @@ class XMPPClient:
             await asyncio.sleep(10)
 
     async def parse_message(self, raw: str) -> None:
-        if '<presence' not in raw:
-            log.debug(f'Received websocket message - {raw}')
+        # if '<presence' not in raw:
+        log.debug(f'Received websocket message - {raw}')
 
         if "<stream:features" in raw and not self._authed:
             sasl_msg = base64.b64encode(
@@ -1283,6 +1284,11 @@ class XMPPClient:
         while self._connected:
             if self.stanza != stanza:
                 await self.xmpp_send(self.stanza)
+                await self.client.http.chat_send_presence(
+                    connection_id=self.client.websocket.connection_id,
+                    auth="EAS_ACCESS_TOKEN",
+                    status=self.status
+                )
                 stanza = self.stanza
             await asyncio.sleep(1)
 
@@ -1422,6 +1428,7 @@ class XMPPClient:
                 f"<show>{show}</show>"
                 f"</presence>"
             )
+            self.status = _status.get('status') or self.status
 
     async def send_presence(
         self,

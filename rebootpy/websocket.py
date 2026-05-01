@@ -139,6 +139,8 @@ class WebsocketClient:
 
         self.heartbeat_started = False
 
+        self.connection_id = None
+
     async def set_session(self) -> None:
         self.wss_session = aiohttp.ClientSession(
             skip_auto_headers=["Accept", "Accept-Encoding", "User-Agent"],
@@ -182,8 +184,9 @@ class WebsocketClient:
                                           f"destination:launcher\n\n\x00")
         elif (message_type == 'MESSAGE' and 'type' in data
               and data['type'] == 'core.connect.v1.connected'):
+            self.connection_id = data['connectionId']
             await self.send_presence(
-                connection_id=data['connectionId']
+                connection_id=self.connection_id
             )
         elif (
             message_type == 'MESSAGE' and

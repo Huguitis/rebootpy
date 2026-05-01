@@ -1757,18 +1757,21 @@ class HTTPClient:
 
     async def chat_send_presence(self,
                                  connection_id: str,
-                                 **kwargs: Any
+                                 status='',
+                                 **kwargs: Any,
                                  ) -> Any:
+        print(f'Sending "{status}" from chat_send_presence')
+
         payload = {
             "status": "online",
             "activity": {
-                "value": ""
+                "value": status
             },
             "props": {
                 "EOS_Platform": "WIN",
                 "EOS_IntegratedPlatform": "EGS",
                 "EOS_OnlinePlatformType": "100",
-                "EOS_ProductVersion": "++Fortnite+Release-30.30-CL-34891016",
+                "EOS_ProductVersion": "++Fortnite+Release-40.30-CL-53093531",
                 "EOS_ProductName": "Fortnite",
                 "EOS_Session": "{\"version\":3}",
                 "EOS_Lobby": "{\"version\":3}"
