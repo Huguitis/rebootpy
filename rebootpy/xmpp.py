@@ -225,9 +225,9 @@ class XMLProcessor:
     def process(self, raw: str) -> Optional[Union[tuple, bool]]:
         # Yes, this is a hacky solution but it's better than
         # using the quite unnecessary slow aioxmpp one.
-        if '<presence' in raw:
-            return self._process_presence(raw)
-        elif '<message' in raw:
+        # if '<presence' in raw:
+        #     return self._process_presence(raw)
+        if '<message' in raw:
             return self._process_message(raw)
 
         return False
@@ -1036,72 +1036,73 @@ class XMPPClient:
         if friend is not None:
             self.client.dispatch_event('party_invite_decline', friend)
 
-    @EventDispatcher.presence()
-    async def process_presence(self, user_id: str,
-                               platform: str,
-                               type_: str,
-                               status: str,
-                               show: str) -> None:
-        try:
-            data = json.loads(status)
-
-            ch = data.get('Status', '') != ''
-
-            is_dict = isinstance(data.get('Properties', {}), dict)
-            if (not ch or 'bIsPlaying' not in data or not is_dict):
-                return
-        except ValueError:
-            return
-
-        friend = self.client.get_friend(user_id)
-        if friend is None:
-            try:
-                friend = await self.client.wait_for(
-                    'friend_add',
-                    check=lambda f: f.id == user_id,
-                    timeout=1
-                )
-            except asyncio.TimeoutError:
-                return
-
-        is_available = type_ is None or type_ == 'available'
-
-        try:
-            away = AwayStatus(show)
-        except ValueError:
-            away = AwayStatus.ONLINE
-
-        _pres = Presence(
-            self.client,
-            user_id,
-            platform,
-            is_available,
-            away,
-            data
-        )
-
-        if _pres.party is not None:
-            try:
-                display_name = _pres.party.raw['sourceDisplayName']
-                if display_name != _pres.friend.display_name:
-                    _pres.friend._update_display_name(display_name)
-            except (KeyError, AttributeError):
-                pass
-
-        before_pres = friend.last_presence
-
-        if not is_available and friend.is_online():
-            friend._update_last_logout(datetime.datetime.utcnow())
-
-            try:
-                del self.client._presences[user_id]
-            except KeyError:
-                pass
-
-        else:
-            self.client._presences[user_id] = _pres
-
-        self.client.dispatch_event('friend_presence', before_pres, _pres)
+    # @EventDispatcher.presence()
+    # async def process_presence(self, user_id: str,
+    #                            platform: str,
+    #                            type_: str,
+    #                            status: str,
+    #                            show: str) -> None:
+    #     try:
+    #         data = json.loads(status)
+    #
+    #         ch = data.get('Status', '') != ''
+    #
+    #         is_dict = isinstance(data.get('Properties', {}), dict)
+    #         if (not ch or 'bIsPlaying' not in data or not is_dict):
+    #             return
+    #     except ValueError:
+    #         return
+    #
+    #     friend = self.client.get_friend(user_id)
+    #     if friend is None:
+    #         try:
+    #             friend = await self.client.wait_for(
+    #                 'friend_add',
+    #                 check=lambda f: f.id == user_id,
+    #                 timeout=1
+    #             )
+    #         except asyncio.TimeoutError:
+    #             return
+    #
+    #     is_available = type_ is None or type_ == 'available'
+    #
+    #     try:
+    #         away = AwayStatus(show)
+    #     except ValueError:
+    #         away = AwayStatus.ONLINE
+    #
+    #     _pres = Presence(
+    #         self.client,
+    #         user_id,
+    #         platform,
+    #         is_available,
+    #         away,
+    #         data
+    #     )
+    #
+    #     if _pres.party is not None:
+    #         try:
+    #             display_name = _pres.party.raw['sDN']
+    #             if display_name != _pres.friend.display_name:
+    #                 _pres.friend._update_display_name(display_name)
+    #         except (KeyError, AttributeError):
+    #             pass
+    #
+    #     before_pres = friend.last_presence
+    #
+    #     manually check with real client
+    #     if not is_available and friend.is_online():
+    #         friend._update_last_logout(datetime.datetime.utcnow())
+    #
+    #         try:
+    #             del self.client._presences[user_id]
+    #         except KeyError:
+    #             pass
+    #
+    #     else:
+    #         self.client._presences[user_id] = _pres
+    #
+    #     self.client.dispatch_event('friend_presence', before_pres, _pres)
 
     # def on_stream_established(self) -> None:
     #     self.client.dispatch_event('xmpp_session_establish')
@@ -1272,9 +1273,9 @@ class XMPPClient:
                 return
             else:
                 type_ = ret[0]
-                if type_ == "presence":
-                    EventDispatcher.process_presence(self.client, *ret[1])
-                elif type_ == "message":
+                # if type_ == "presence":
+                #     EventDispatcher.process_presence(self.client, *ret[1])
+                if type_ == "message":
                     EventDispatcher.process_event(self.client, *ret[1])
                 else:
                     log(f"Unhandled XML type: {type_}")
