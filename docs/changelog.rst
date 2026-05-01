@@ -6,7 +6,7 @@ Changelog
 Detailed version changes.
 You can also view the changelog of the original library, fortnitepy, `here <https://fortnitepy.readthedocs.io/en/latest/changelog.html>`_.
 
-v1.0.2
+v1.0.3
 ------
 
 Added
