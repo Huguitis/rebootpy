@@ -6,7 +6,15 @@ Changelog
 Detailed version changes.
 You can also view the changelog of the original library, fortnitepy, `here <https://fortnitepy.readthedocs.io/en/latest/changelog.html>`_.
 
-v1.0.2 (pre-release)
+v1.1.0 (pre-release)
+------
+
+Bug Fixes
+~~~~~
+
+- Fixed issue where public parties didn't appear public.
+
+v1.0.3
 ------
 
 Added
@@ -18,6 +26,11 @@ Removed
 ~~~~~~~
 
 - Removed :meth:`ClientPartyMember.hifive_sidekick()` & :meth:`ClientPartyMember.clear_hifive()`, use `set_sidekick_emote("Interact")` now to hi-five your sidekick.
+
+Bug Fixes
+~~~~~
+
+- Fixed issue where presence/status was not being updated.
 
 v1.0.1
 ------

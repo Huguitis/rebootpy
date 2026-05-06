@@ -33,6 +33,7 @@ import base64
 import datetime
 
 from .message import FriendMessage, PartyMessage
+from .presence import Presence
 
 from aiohttp import hdrs, helpers, client_reqrep, connector
 from aiohttp.http import StreamWriter, HttpVersion10, HttpVersion11
@@ -139,6 +140,8 @@ class WebsocketClient:
 
         self.heartbeat_started = False
 
+        self.connection_id = None
+
     async def set_session(self) -> None:
         self.wss_session = aiohttp.ClientSession(
             skip_auto_headers=["Accept", "Accept-Encoding", "User-Agent"],
@@ -182,8 +185,9 @@ class WebsocketClient:
                                           f"destination:launcher\n\n\x00")
         elif (message_type == 'MESSAGE' and 'type' in data
               and data['type'] == 'core.connect.v1.connected'):
+            self.connection_id = data['connectionId']
             await self.send_presence(
-                connection_id=data['connectionId']
+                connection_id=self.connection_id
             )
         elif (
             message_type == 'MESSAGE' and
@@ -237,6 +241,50 @@ class WebsocketClient:
                 author=party._members[data['payload']['message']['senderId']],
                 content=decoded_content
             ))
+        elif (
+            message_type == 'MESSAGE' and
+            data.get('type') == 'presence.v1.UPDATE'
+        ):
+            user_id = data['payload']['accountId']
+            friend = self.client.get_friend(user_id)
+            if friend is None:
+                try:
+                    friend = await self.client.wait_for(
+                        'friend_add',
+                        check=lambda f: f.id == user_id,
+                        timeout=1
+                    )
+                except asyncio.TimeoutError:
+                    return
+
+            _pres = Presence(
+                self.client,
+                data['payload']
+            )
+
+            if _pres.party is not None:
+                try:
+                    display_name = _pres.party.raw['sDN']
+                    if display_name != _pres.friend.display_name:
+                        _pres.friend._update_display_name(display_name)
+                except (KeyError, AttributeError):
+                    pass
+
+            before_pres = friend.last_presence
+
+            # Check how real client handles this.
+            # if not is_available and friend.is_online():
+            #     friend._update_last_logout(datetime.datetime.utcnow())
+            #
+            #     try:
+            #         del self.client._presences[user_id]
+            #     except KeyError:
+            #         pass
+            #
+            # else:
+            self.client._presences[user_id] = _pres
+
+            self.client.dispatch_event('friend_presence', before_pres, _pres)
         elif (
             message_type == 'ERROR' and
             data.get('statusCode') == 4019

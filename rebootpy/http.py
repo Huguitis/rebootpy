@@ -1757,29 +1757,107 @@ class HTTPClient:
 
     async def chat_send_presence(self,
                                  connection_id: str,
+                                 status: str = None,
                                  **kwargs: Any
                                  ) -> Any:
-        payload = {
-            "status": "online",
-            "activity": {
-                "value": ""
-            },
-            "props": {
-                "EOS_Platform": "WIN",
-                "EOS_IntegratedPlatform": "EGS",
-                "EOS_OnlinePlatformType": "100",
-                "EOS_ProductVersion": "++Fortnite+Release-30.30-CL-34891016",
-                "EOS_ProductName": "Fortnite",
-                "EOS_Session": "{\"version\":3}",
-                "EOS_Lobby": "{\"version\":3}"
-            },
-            "conn": {
-                "props": {}
+        if not self.client.party:
+            payload = {
+                "status": "online",
+                "props": {
+                    "EOS_Platform": "WIN",
+                    "EOS_IntegratedPlatform": "EGS",
+                    "EOS_OnlinePlatformType": "100",
+                    "EOS_ProductVersion": self.client.build,
+                    "EOS_ProductName": "Fortnite",
+                    "EOS_Session": "{\"version\":3}",
+                    "EOS_Lobby": "{\"version\":3}"
+                },
+                "conn": {
+                    "props": {}
+                }
             }
-        }
+        else:
+            raw_status = status or self.client.status
+            formatted_status = raw_status.format(
+                party_size=self.client.party.member_count,
+                party_max_size=self.client.party.max_size,
+                current_playlist=self.client.current_status_playlist
+            )
 
-        r = ChatService(f'/epic/presence/v1/{self.client.deployment_id}/'
-                        f'{self.client.user.id}/presence/{connection_id}')
+            payload = {
+                "status": "online",
+                "activity": {
+                    "value": formatted_status
+                },
+                "props": {
+                    "FortBasicInfo": f"m{json.dumps(
+                        {
+                            "homeBaseRating": 0
+                        }
+                    )}",
+                    "FortLFG": "i0",
+                    "FortPartySize": "i1",
+                    "FortSubGame": "i1",
+                    "IslandCode": f"s{self.client.party.playlist_info[0]}",
+                    "IsInZone": "bfalse",
+                    "FortGameplayStats": f"m{json.dumps(
+                        {
+                            "state": "",
+                            "playlist": "None",
+                            "numKills": 0,
+                            "bFellToDeath": False
+                        }
+                    )}",
+                    "SocialStatus": f"m{json.dumps(
+                        {
+                            "attendingSocialEventIds": []
+                        }
+                    )}",
+                    "InUnjoinableMatch": "bfalse",
+                    "EOS_Platform": self.client.platform.value,
+                    "EOS_IntegratedPlatform": "EGS",
+                    "EOS_OnlinePlatformType": "100",
+                    "EOS_ProductVersion": self.client.build,
+                    "EOS_ProductName": "Fortnite",
+                    "EOS_Session": json.dumps(
+                        {
+                            "version": 3
+                        }
+                    ),
+                    "EOS_Lobby": json.dumps(
+                        {
+                            "version": 3
+                        }
+                    )
+                },
+                "conn": {
+                    "props": {}
+                }
+            }
+
+            perm = self.client.party.config['privacy'][
+                'presencePermission'
+            ]
+            if perm == 'Anyone':
+                payload["props"][
+                    "party.joininfodata.286331153"
+                ] = f"m{json.dumps(
+                    {
+                        "sDN": self.client.user.display_name,
+                        "sP": self.client.platform.value,
+                        "p": self.client.party.id,
+                        "d": "Fortnite",
+                        "b": self.client.party_build_id,
+                        "f": 6,
+                        "nAR": 0,
+                        "pc": self.client.party.member_count
+                    }
+                )}"
+
+        r = ChatService(
+            f'/epic/presence/v1/{self.client.deployment_id}/'
+            f'{self.client.user.id}/presence/{connection_id}'
+        )
         return await self.patch(r, json=payload, **kwargs)
 
     async def chat_get_conversation_data(self,
