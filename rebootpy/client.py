@@ -2926,6 +2926,9 @@ class Client(BasicClient):
         self._epic_party_missing_current_count = 0
 
         self._chat_message_sequences: Dict[str, int] = {}
+        # isReportable each party conversation expects, learned from Epic's
+        # is_reportable_mismatch errors (it is set by whoever made the party).
+        self._chat_is_reportable: Dict[str, bool] = {}
 
         self._reconnecting_to_party = False
 

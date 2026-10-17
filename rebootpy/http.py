@@ -2233,7 +2233,20 @@ class HTTPClient:
 
             raise exc
 
-    async def party_send_message(self, content: str) -> Any:
+    @staticmethod
+    def _expected_is_reportable(exc: HTTPException) -> Optional[bool]:
+        # "The isReportable flag did not match the expected value for
+        # conversation <id>: true" - the expected value is the last var.
+        candidates = [str(v) for v in reversed(exc.message_vars or [])]
+        candidates.append((exc.message or '').rsplit(':', 1)[-1])
+        for value in candidates:
+            value = value.strip().lower()
+            if value in ('true', 'false'):
+                return value == 'true'
+        return None
+
+    async def party_send_message(self, content: str,
+                                 retry_on_fail: bool = True) -> Any:
         if len(content) >= 2048:
             raise ChatError("Message body exceeds max length of 2048")
 
@@ -2283,7 +2296,9 @@ class HTTPClient:
             "message": {
                 "body": body
             },
-            "isReportable": False,
+            "isReportable": self.client._chat_is_reportable.get(
+                addressed, False
+            ),
             "metadata": metadata,
         }
 
@@ -2294,7 +2309,26 @@ class HTTPClient:
             conversation_id=addressed,
             client_id=self.client.user.id
         )
-        return await self.post(r, json=payload, auth="EAS_ACCESS_TOKEN")
+        try:
+            return await self.post(r, json=payload, auth="EAS_ACCESS_TOKEN")
+        except HTTPException as exc:
+            m = 'errors.com.epicgames.social.chat.is_reportable_mismatch'
+            if not retry_on_fail or exc.message_code != m:
+                raise
+
+            expected = self._expected_is_reportable(exc)
+            if expected is None:
+                raise
+
+            cache = self.client._chat_is_reportable
+            if len(cache) >= 256:
+                cache.clear()
+            cache[addressed] = expected
+
+            return await self.party_send_message(
+                content,
+                retry_on_fail=False
+            )
 
     ###################################
     #       Public Key Service        #
