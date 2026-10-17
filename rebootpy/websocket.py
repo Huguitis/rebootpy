@@ -37,7 +37,7 @@ from collections import deque
 
 from .message import FriendMessage, PartyMessage
 from .presence import Presence
-from .errors import STOMPError
+from .errors import STOMPError, HTTPException
 
 from aiohttp import hdrs, helpers, client_reqrep, connector
 from aiohttp.http import StreamWriter, HttpVersion10, HttpVersion11
@@ -83,7 +83,7 @@ class WebsocketClient:
                 connection_id=connection_id,
                 auth="EAS_ACCESS_TOKEN"
             )
-        except aiohttp.ClientResponseError as e:
+        except HTTPException as e:
             if e.status == 404 and retry:
                 log.warning(
                     f'Received 404 for presence endpoint (connection_id: {connection_id}). '
@@ -288,17 +288,21 @@ class WebsocketClient:
                 previous=before_pres,
             )
 
-            # Check how real client handles this.
-            # if not is_available and friend.is_online():
-            #     friend._update_last_logout(datetime.datetime.utcnow())
-            #
-            #     try:
-            #         del self.client._presences[user_id]
-            #     except KeyError:
-            #         pass
-            #
-            # else:
-            self.client._presences[user_id] = _pres
+            # The presence cache only holds friends who are online (see
+            # Client.presences), so a friend going offline is pruned rather
+            # than stored. Otherwise is_online()/get_presence() would keep
+            # reporting them online until restart.
+            if _pres.available:
+                self.client._presences[user_id] = _pres
+            else:
+                if before_pres is not None:
+                    friend._update_last_logout(
+                        datetime.datetime.now(datetime.timezone.utc)
+                    )
+                self.client._presences.pop(user_id, None)
+
+            if _pres.party is not None and _pres.party.net_cl:
+                self.client._note_presence_net_cl(_pres.party.net_cl)
 
             self.client.dispatch_event('friend_presence', before_pres, _pres)
         elif (

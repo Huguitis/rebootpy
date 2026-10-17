@@ -3785,7 +3785,8 @@ class PartyBase:
         self.epic_party_id = data.get('epic_party_id')
 
         if self.epic_party_id is None and self._id:
-            match = re.match(r'^([0-9a-f]{32})-\d+-default$', self._id, re.IGNORECASE)
+            # The build segment is empty when the client had no net_cl.
+            match = re.match(r'^([0-9a-f]{32})-\d*-default$', self._id, re.IGNORECASE)
             if match:
                 self.epic_party_id = match.group(1)
 
@@ -4001,7 +4002,11 @@ class PartyBase:
                             self._update_roles(member)
 
         if _update_squad_assignments:
-            if self.leader.id != self.client.user.id:
+            # Epic parties briefly have no CAPTAIN (members arrive before
+            # roles, and a leaving leader is cleared before the new one is
+            # announced). There is no leader to mirror then.
+            leader = self.leader
+            if leader is not None and leader.id != self.client.user.id:
                 _assignments = json.loads(
                     _assignments
                 )['SquadInformation']['rawSquadAssignments']

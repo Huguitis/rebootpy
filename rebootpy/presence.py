@@ -426,6 +426,13 @@ class Presence:
         self.joinable = eos_party.get('joinable', legacy_joinable)
         self.invitable = eos_party.get('invitable')
 
+    @property
+    def available(self) -> bool:
+        """:class:`bool`: ``False`` if this presence reports the friend went
+        offline. Any other status (online, away, ...) counts as available.
+        """
+        return self.raw.get('status') != 'offline'
+
     @staticmethod
     def _merge_raw(previous: dict, current: dict) -> dict:
         merged = {**previous, **current}

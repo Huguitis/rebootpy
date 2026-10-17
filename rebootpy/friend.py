@@ -216,7 +216,7 @@ class Friend(FriendBase):
         pres = self.last_presence
         if pres is None:
             return False
-        return pres.raw.get("status") == "online"
+        return pres.available
 
     def _online_check(self, available: bool) -> bool:
         def check(b, a):

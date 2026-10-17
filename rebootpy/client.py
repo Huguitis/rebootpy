@@ -64,6 +64,15 @@ from .utils import LockEvent, MaybeLock, from_iso, to_iso, is_display_name
 
 log = logging.getLogger(__name__)
 
+# How often the live Fortnite build (net_cl) is re-checked. Party lobbies are
+# per-build (``<epic_party_id>-<net_cl>-default``), so a stale build puts the
+# client in a different lobby than the real players after a game update.
+PARTY_BUILD_REFRESH_INTERVAL = 600
+
+# The live build is the same for every client in the process, so the lookup is
+# shared: one request per interval no matter how many clients are running.
+_live_build = {'net_cl': 0, 'checked_at': 0.0, 'task': None}
+
 
 class StartContext:
     def __init__(self, client: 'BasicClient',
@@ -3095,7 +3104,18 @@ class Client(BasicClient):
             await asyncio.sleep(2)
 
             if not epic_party_rebound:
-                await self._reconnect_to_party()
+                try:
+                    await self._reconnect_to_party()
+                except (Forbidden, HTTPException, asyncio.TimeoutError) as e:
+                    # The old party can't be re-joined (an Epic lobby refuses
+                    # the legacy join, or it is gone). Start a fresh one so
+                    # the client is never left without a party; this runs as
+                    # an event handler, so nothing upstream would catch it.
+                    log.debug(f'party reconnect failed ({e}); creating party')
+                    try:
+                        await self._create_party()
+                    except Exception as exc:
+                        log.debug(f'party create after reconnect failed: {exc}')
         except AttributeError:
             pass
         finally:
@@ -3223,39 +3243,164 @@ class Client(BasicClient):
 
     async def fetch_net_cl(self, priority: int = 0) -> None:
         existing_build = (self.party_build_id or '').split(':')[-1]
-        if existing_build:
-            try:
-                parsed = int(existing_build)
-            except ValueError:
-                parsed = 0
-
-            if parsed > 0:
-                self.net_cl = existing_build
-                return
-
-        live = None
-        if self.fetch_net_cl_on_ready:
-            try:
-                sessions = await self.http.matchmaking_request(
-                    priority=priority
-                )
-                live = int(sessions[0]['buildUniqueId'])
-            except (HTTPException, IndexError, KeyError, TypeError,
-                    ValueError):
-                live = None
-
-            if live is not None and live <= 0:
-                live = None
-
-        if live:
-            self.net_cl = str(live)
+        if self._parse_net_cl(existing_build) > 0:
+            self.net_cl = existing_build
+        else:
+            await self.refresh_party_build(priority=priority)
 
         self.party_build_id = '1:{0.party_version}:{0.net_cl}'.format(self)
         log.debug(
             'Resolved party build id to %s%s',
             self.party_build_id,
-            '' if live else ' (fallback)'
+            '' if self._parse_net_cl(self.net_cl) > 0 else ' (fallback)'
         )
+
+    @staticmethod
+    def _parse_net_cl(value: Any) -> int:
+        try:
+            return max(int(str(value).strip()), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _adopt_net_cl(self, net_cl: Any) -> bool:
+        """Switches to ``net_cl`` if it is newer than the build in use.
+
+        Builds only ever move forward, so an older value is ignored.
+        """
+        value = self._parse_net_cl(net_cl)
+        if value <= self._parse_net_cl(self.net_cl):
+            return False
+
+        self.net_cl = str(value)
+        self.party_build_id = '1:{0.party_version}:{0.net_cl}'.format(self)
+        log.debug(f'Party build id is now {self.party_build_id}')
+        return True
+
+    async def _lookup_live_net_cl(self, priority: int = 0) -> None:
+        try:
+            sessions = await self.http.matchmaking_request(priority=priority)
+            live = self._parse_net_cl(sessions[0]['buildUniqueId'])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug(f'live build lookup failed: {e}')
+            live = 0
+
+        if live > 0:
+            _live_build['net_cl'] = max(_live_build['net_cl'], live)
+        else:
+            # Retry soon rather than running a whole interval on a bad value.
+            _live_build['checked_at'] = (
+                time.time() - PARTY_BUILD_REFRESH_INTERVAL + 30
+            )
+
+    async def refresh_party_build(self, priority: int = 0,
+                                  max_age: float = PARTY_BUILD_REFRESH_INTERVAL
+                                  ) -> None:
+        """|coro|
+
+        Makes sure :attr:`party_build_id` matches the live Fortnite build,
+        re-checking it when the shared lookup is older than ``max_age``
+        seconds. Never raises: on failure the last known build is kept.
+        """
+        try:
+            if self.fetch_net_cl_on_ready:
+                task = _live_build['task']
+                if task is not None and (
+                    task.done()
+                    or task.get_loop() is not asyncio.get_running_loop()
+                ):
+                    task = None
+
+                if (task is None
+                        and time.time() - _live_build['checked_at'] >= max_age):
+                    _live_build['checked_at'] = time.time()
+                    task = asyncio.ensure_future(
+                        self._lookup_live_net_cl(priority=priority)
+                    )
+                    _live_build['task'] = task
+
+                if task is not None:
+                    # Shielded: a caller being cancelled must not cancel the
+                    # lookup every other client is waiting on.
+                    await asyncio.shield(task)
+
+            self._adopt_net_cl(_live_build['net_cl'])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug(f'party build refresh failed: {e}')
+
+    def _note_presence_net_cl(self, net_cl: Any) -> None:
+        """A friend advertised a newer build than ours: the game has probably
+        updated. Presence is controlled by the friend, so it is never adopted
+        directly — it only triggers an early re-check of the live build.
+        """
+        value = self._parse_net_cl(net_cl)
+        if value <= max(self._parse_net_cl(self.net_cl), _live_build['net_cl']):
+            return
+
+        self.loop.create_task(self.refresh_party_build(max_age=60))
+
+    def _party_lobby_id(self, epic_party_id: str) -> str:
+        """The Party Service lobby to use for ``epic_party_id``.
+
+        A friend already in that party advertises the exact lobby the players
+        are in, which is always right; otherwise build it from our own build.
+        """
+        prefix = f'{epic_party_id}-'
+        for presence in list(self._presences.values()):
+            party = presence.party
+            if party is None or not isinstance(party.id, str):
+                continue
+            if party.id.startswith(prefix) and party.id.endswith('-default'):
+                return party.id
+
+        build_id = (self.party_build_id or '').split(':')[-1]
+        return f'{epic_party_id}-{build_id}-default'
+
+    async def _recreate_stale_build_lobby(self) -> None:
+        """Moves a client that is alone in its party onto the live build.
+
+        Lobbies are per build, so after a game update players joining us end
+        up in a different lobby and never see the client. Nobody is in the
+        party to lose, so recreating it is free.
+        """
+        party = self.party
+        if party is None or not party.epic_party_id or party.member_count != 1:
+            return
+
+        parts = (party.id or '').split('-')
+        if len(parts) != 3 or parts[2] != 'default':
+            return
+
+        own = self._parse_net_cl(self.net_cl)
+        lobby = self._parse_net_cl(parts[1])
+        if own <= 0 or lobby == own:
+            return
+        if lobby > own:
+            # The lobby is ahead of us (joined via a friend's advertised
+            # lobby): our build is the stale one, never move backwards.
+            self._note_presence_net_cl(lobby)
+            return
+
+        if (self._join_party_lock.locked()
+                or self._epic_party_recreate_in_flight
+                or time.time() - self._epic_party_last_recreate_at < 30):
+            return
+
+        self._epic_party_recreate_in_flight = True
+        self._epic_party_last_recreate_at = time.time()
+        try:
+            log.debug(
+                f'recreating party on build {own} (lobby was on {lobby or "?"})'
+            )
+            await self._create_party()
+            self.dispatch_event('party_recreated')
+        except Exception as e:
+            log.debug(f'stale build recreate failed: {e}')
+        finally:
+            self._epic_party_recreate_in_flight = False
 
     def _get_private_connection_id(self, connection_id: str) -> str:
         if self.websocket.private_connection_id:
@@ -3447,6 +3592,7 @@ class Client(BasicClient):
             connection_id
         )
 
+        await self.refresh_party_build(priority=priority)
         await self.send_eos_presence()
 
         try:
@@ -3546,6 +3692,8 @@ class Client(BasicClient):
             connection_id
         )
 
+        await self.refresh_party_build()
+
         await self._join_party_lock.acquire()
         try:
             if self.party is not None:
@@ -3578,8 +3726,7 @@ class Client(BasicClient):
                 epic_party_id, public_connection_id
             )
 
-            build_id = (self.party_build_id or '').split(':')[-1]
-            lobby_id = f'{epic_party_id}-{build_id}-default'
+            lobby_id = self._party_lobby_id(epic_party_id)
 
             lobby_config = {
                 'discoverability': 'ALL',
@@ -3737,6 +3884,9 @@ class Client(BasicClient):
                     )
             elif not local_epic_party_id:
                 self._epic_party_missing_current_count = 0
+            elif current.get('id') == local_epic_party_id:
+                await self.refresh_party_build()
+                await self._recreate_stale_build_lobby()
 
             if self._event_has_destination('party_invite'):
                 for invite in invites:
