@@ -1091,7 +1091,8 @@ class PartyMemberMeta(MetaBase):
 
     @property
     def victory_crowns(self) -> int:
-        return self._loadout_stat('TotalRoyalRoyales')
+        return (self._loadout_stat('TotalRoyalRoyales')
+                or self._loadout_stat('TotalVictoryCrowns'))
 
     @property
     def rank(self) -> int:
@@ -1399,6 +1400,8 @@ class PartyMemberMeta(MetaBase):
         if has_crown is not None:
             stats = _write_loadout_stat(stats, 'HasCrown', has_crown)
         if victory_crowns is not None:
+            stats = _write_loadout_stat(stats, 'TotalVictoryCrowns',
+                                        victory_crowns)
             stats = _write_loadout_stat(stats, 'TotalRoyalRoyales',
                                         victory_crowns)
         if rank is not None:
