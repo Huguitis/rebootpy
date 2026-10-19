@@ -813,6 +813,8 @@ class XMPPClient:
         party._update_roles(member)
 
         party.update_presence()
+        if member.id == self.client.user.id:
+            party._schedule_leader_squad_refresh()
         self.client.dispatch_event('party_member_promote', old_leader, member)
 
     @EventDispatcher.event('com.epicgames.social.party.notification.v0.PARTY_UPDATED')  # noqa

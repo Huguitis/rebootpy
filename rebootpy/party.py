@@ -24,6 +24,7 @@ SOFTWARE.
 
 import json
 import asyncio
+import logging
 import re
 import functools
 import datetime
@@ -45,6 +46,8 @@ from .stw import fort_mappings
 
 if TYPE_CHECKING:
     from .client import Client
+
+log = logging.getLogger(__name__)
 
 
 class SquadAssignment:
@@ -2638,9 +2641,13 @@ class ClientPartyMember(PartyMemberBase, Patchable):
     def do_on_member_join_patch(self) -> None:
         async def patcher():
             try:
-                # max=30 because 30 is the maximum amount of props that
-                # can be updated at once.
-                await self.patch(max=30)
+                # 30 is the most props one update may carry, so the whole meta
+                # goes in batches. Sending only the first 30 left the rest
+                # (the member meta now has more than 30 keys) unsent for a
+                # member that joined later.
+                items = list(self.meta.schema.items())
+                for i in range(0, len(items), 30):
+                    await self.patch(updated=dict(items[i:i + 30]))
             except HTTPException as exc:
                 m = 'errors.com.epicgames.social.party.party_not_found'
                 if exc.message_code != m:
@@ -4633,6 +4640,28 @@ class ClientParty(PartyBase, Patchable):
         check = not self.edit_lock.locked() if could_be_edit else True
         if check:
             return await self.patch(updated=prop)
+
+    def _schedule_leader_squad_refresh(self) -> None:
+        """Rebuilds the squad assignments once we have become leader.
+
+        Fortnite only renders members that appear in the leader's squad
+        assignments. A new leader inherits the previous leader's list, so a
+        member the previous leader never placed stayed invisible until
+        someone joined or left. The game rebuilds the list on promotion; so
+        do we.
+        """
+        me = self.me
+        if me is None or me._default_config.yield_leadership:
+            return
+
+        async def refresh():
+            try:
+                await self.refresh_squad_assignments(could_be_edit=True)
+            except Exception as e:
+                log.debug(f'Could not refresh squad assignments after '
+                          f'becoming leader: {e}')
+
+        asyncio.ensure_future(refresh())
 
     async def set_squad_assignments(self, assignments: Dict[PartyMember, SquadAssignment]) -> None:  # noqa
         """|coro|

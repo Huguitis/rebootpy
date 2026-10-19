@@ -3345,22 +3345,100 @@ class Client(BasicClient):
 
         self.loop.create_task(self.refresh_party_build(max_age=60))
 
+    def _lobby_id_from_presences(self, epic_party_id: str) -> Optional[str]:
+        """The lobby a friend already in ``epic_party_id`` advertises, if any.
+
+        The lobby id (``p``) is exact. Some presences carry only the Epic party
+        id and the build (``b``), which gives the same id. Either way it is the
+        lobby the players actually render, unlike one built from our build.
+        """
+        prefix = f'{epic_party_id}-'
+        from_build = None
+        for presence in list(self._presences.values()):
+            party = presence.party
+            if party is None:
+                continue
+            if (isinstance(party.id, str) and party.id.startswith(prefix)
+                    and party.id.endswith('-default')):
+                return party.id
+            if party.epic_party_id == epic_party_id and party.net_cl:
+                from_build = f'{epic_party_id}-{party.net_cl}-default'
+        return from_build
+
     def _party_lobby_id(self, epic_party_id: str) -> str:
         """The Party Service lobby to use for ``epic_party_id``.
 
         A friend already in that party advertises the exact lobby the players
         are in, which is always right; otherwise build it from our own build.
         """
-        prefix = f'{epic_party_id}-'
-        for presence in list(self._presences.values()):
-            party = presence.party
-            if party is None or not isinstance(party.id, str):
-                continue
-            if party.id.startswith(prefix) and party.id.endswith('-default'):
-                return party.id
+        found = self._lobby_id_from_presences(epic_party_id)
+        if found is not None:
+            return found
 
         build_id = (self.party_build_id or '').split(':')[-1]
         return f'{epic_party_id}-{build_id}-default'
+
+    async def _resolve_party_lobby_id(self, epic_party_id: str,
+                                      timeout: float = 3.0) -> str:
+        """Like :meth:`_party_lobby_id`, but waits briefly for a presence.
+
+        Joining with a lobby id on the wrong build doesn't fail: the Party
+        Service creates a second, empty lobby under the same Epic party. The
+        client then shows in the party's member list but is invisible in the
+        game's lobby. Right after a friend request is accepted the inviter's
+        presence often hasn't arrived yet, so give it a moment before falling
+        back to our own build.
+        """
+        found = self._lobby_id_from_presences(epic_party_id)
+        if found is not None:
+            return found
+
+        def check(before, after):
+            party = getattr(after, 'party', None)
+            return party is not None and (
+                party.epic_party_id == epic_party_id
+                or (isinstance(party.id, str)
+                    and party.id.startswith(f'{epic_party_id}-'))
+            )
+
+        try:
+            await self.wait_for('friend_presence', check=check, timeout=timeout)
+        except asyncio.TimeoutError:
+            log.debug(
+                f'no presence advertises the lobby of {epic_party_id}; '
+                'using our own build'
+            )
+        return self._party_lobby_id(epic_party_id)
+
+    async def _warn_if_alone_in_lobby(self, epic_party_id: str,
+                                      lobby_id: str, lobby: dict) -> None:
+        """Logs when we joined a lobby nobody else is in while the Epic party
+        has other players: the lobby id was built on the wrong build, and the
+        players can't see this client."""
+        others = [m for m in (lobby or {}).get('members') or []
+                  if m.get('account_id') != self.user.id]
+        if others:
+            return
+        try:
+            state = await self.http.epic_party_get_user()
+        except HTTPException:
+            return
+        current = (state or {}).get('current') or {}
+        if current.get('id') != epic_party_id:
+            return
+        in_game = [
+            m for m in current.get('members') or []
+            if m.get('account_id') != self.user.id and any(
+                (c.get('meta') or {}).get('game') == 'fn'
+                for c in m.get('connections') or []
+            )
+        ]
+        if in_game:
+            log.warning(
+                f'joined lobby {lobby_id} alone, but the Epic party has '
+                f'{len(in_game)} other player(s) in game: the lobby is '
+                'probably on another build and they will not see this client'
+            )
 
     async def _recreate_stale_build_lobby(self) -> None:
         """Moves a client that is alone in its party onto the live build.
@@ -3696,6 +3774,7 @@ class Client(BasicClient):
         )
 
         await self.refresh_party_build()
+        resolved_lobby_id = await self._resolve_party_lobby_id(epic_party_id)
 
         await self._join_party_lock.acquire()
         try:
@@ -3729,7 +3808,9 @@ class Client(BasicClient):
                 epic_party_id, public_connection_id
             )
 
-            lobby_id = self._party_lobby_id(epic_party_id)
+            # A presence that arrived while we were joining beats the guess.
+            lobby_id = (self._lobby_id_from_presences(epic_party_id)
+                        or resolved_lobby_id)
 
             lobby_config = {
                 'discoverability': 'ALL',
@@ -3740,6 +3821,7 @@ class Client(BasicClient):
             lobby = await self.http.party_lobby_join(
                 epic_party_id, lobby_id, lobby_config
             )
+            await self._warn_if_alone_in_lobby(epic_party_id, lobby_id, lobby)
 
             party = self.construct_party(lobby)
             party.epic_party_id = epic_party_id
@@ -4102,6 +4184,8 @@ class Client(BasicClient):
                     else:
                         party._update_roles(new_leader)
                         party.update_presence()
+                        if new_leader.id == self.user.id:
+                            party._schedule_leader_squad_refresh()
                         self.dispatch_event(
                             'party_member_promote',
                             old_leader,
