@@ -3378,38 +3378,6 @@ class Client(BasicClient):
         build_id = (self.party_build_id or '').split(':')[-1]
         return f'{epic_party_id}-{build_id}-default'
 
-    async def _resolve_party_lobby_id(self, epic_party_id: str,
-                                      timeout: float = 3.0) -> str:
-        """Like :meth:`_party_lobby_id`, but waits briefly for a presence.
-
-        Joining with a lobby id on the wrong build doesn't fail: the Party
-        Service creates a second, empty lobby under the same Epic party. The
-        client then shows in the party's member list but is invisible in the
-        game's lobby. Right after a friend request is accepted the inviter's
-        presence often hasn't arrived yet, so give it a moment before falling
-        back to our own build.
-        """
-        found = self._lobby_id_from_presences(epic_party_id)
-        if found is not None:
-            return found
-
-        def check(before, after):
-            party = getattr(after, 'party', None)
-            return party is not None and (
-                party.epic_party_id == epic_party_id
-                or (isinstance(party.id, str)
-                    and party.id.startswith(f'{epic_party_id}-'))
-            )
-
-        try:
-            await self.wait_for('friend_presence', check=check, timeout=timeout)
-        except asyncio.TimeoutError:
-            log.debug(
-                f'no presence advertises the lobby of {epic_party_id}; '
-                'using our own build'
-            )
-        return self._party_lobby_id(epic_party_id)
-
     async def _warn_if_alone_in_lobby(self, epic_party_id: str,
                                       lobby_id: str, lobby: dict) -> None:
         """Logs when we joined a lobby nobody else is in while the Epic party
@@ -3774,7 +3742,6 @@ class Client(BasicClient):
         )
 
         await self.refresh_party_build()
-        resolved_lobby_id = await self._resolve_party_lobby_id(epic_party_id)
 
         await self._join_party_lock.acquire()
         try:
@@ -3808,9 +3775,7 @@ class Client(BasicClient):
                 epic_party_id, public_connection_id
             )
 
-            # A presence that arrived while we were joining beats the guess.
-            lobby_id = (self._lobby_id_from_presences(epic_party_id)
-                        or resolved_lobby_id)
+            lobby_id = self._party_lobby_id(epic_party_id)
 
             lobby_config = {
                 'discoverability': 'ALL',
@@ -3834,7 +3799,28 @@ class Client(BasicClient):
         else:
             self._join_party_lock.release()
 
+        asyncio.ensure_future(self._ensure_member_meta_sent(party))
         return party
+
+    async def _ensure_member_meta_sent(self, party: ClientParty,
+                                       delay: float = 6.0) -> None:
+        """Sends our member meta if nothing has gone out since joining.
+
+        The full member meta is sent when our own MEMBER_JOINED event is
+        handled. If that event is lost, the Party Service keeps only the
+        three join keys: players see a default avatar and the leader never
+        gives us a squad slot, so we are invisible in the lobby.
+        """
+        await asyncio.sleep(delay)
+        if self.party is not party or party.me is None:
+            return
+        if party.me.revision > 0:
+            return
+        log.warning(
+            f'member meta for {party.id} was never sent after joining; '
+            'sending it now'
+        )
+        party.me.do_on_member_join_patch()
 
     async def recreate_party_after_epic_disband(
         self,

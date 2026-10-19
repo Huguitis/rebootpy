@@ -553,6 +553,24 @@ class XMPPClient:
 
         party = self.client.party
 
+        if (user_id == self.client.user.id
+                and (party is None or party.id != body.get('party_id'))
+                and self.client._join_party_lock.locked()):
+            # Our own join into an Epic party lobby: join_party is still
+            # building the party (members that aren't friends need an account
+            # lookup first), so the event can beat it. Dropping it meant this
+            # client never sent its member meta or dispatched its own join —
+            # in the lobby with revision 0, a default avatar and no squad
+            # slot, i.e. invisible. It happened to every bot joining a party
+            # that already had someone who isn't its friend.
+            try:
+                await asyncio.wait_for(
+                    self.client._join_party_lock.wait(), timeout=20
+                )
+            except asyncio.TimeoutError:
+                pass
+            party = self.client.party
+
         if party is None:
             return
 
