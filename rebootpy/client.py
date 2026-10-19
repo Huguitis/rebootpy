@@ -4634,6 +4634,10 @@ class Client(BasicClient):
                 k: v for k, v in party.meta.schema.items()
                 if k.startswith('Default:')
             }
+            if epic_party_id:
+                default_schema['urn:epic:cfg:build-id_s'] = party.meta.set_prop(
+                    'urn:epic:cfg:build-id_s', str(self.party_build_id)
+                )
 
             await party.patch(
                 updated={

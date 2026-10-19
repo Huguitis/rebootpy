@@ -500,6 +500,35 @@ class Patchable:
         )
 
 
+def _read_loadout_stat(stats: list, name: str) -> int:
+    for stat in stats or []:
+        if isinstance(stat, str):
+            key, _, value = stat.partition(':')
+            if key == name:
+                try:
+                    return int(value)
+                except ValueError:
+                    return 0
+        elif isinstance(stat, dict) and stat.get('statName') == name:
+            return stat.get('statValue', 0)
+    return 0
+
+
+def _write_loadout_stat(stats: list, name: str, value: Any) -> list:
+    out = []
+    found = False
+    for stat in stats or []:
+        if isinstance(stat, dict):
+            stat = f"{stat.get('statName')}:{int(stat.get('statValue', 0))}"
+        if isinstance(stat, str) and stat.partition(':')[0] == name:
+            stat = f'{name}:{int(value)}'
+            found = True
+        out.append(stat)
+    if not found:
+        out.append(f'{name}:{int(value)}')
+    return out
+
+
 class MetaBase:
     def __init__(self) -> None:
         self.schema = {}
@@ -594,7 +623,6 @@ class PartyMemberMeta(MetaBase):
                         "bUsingGracefulUpgrade": True,
                         "matchmakingId": uuid.uuid4().hex.upper()
                     },
-                    "bHasOwnerStartedMM": False,
                     "bIsEligible": True,
                     "islandSelection": {
                         "island": json.dumps({
@@ -607,25 +635,27 @@ class PartyMemberMeta(MetaBase):
                                 }
                             },
                             "MatchmakingSettingsV2": {
+                                "/Fortnite.com/Matchmaking:SquadFill": "NoFill",
+                                "/Fortnite.com/Matchmaking:Ranked": "Unranked",
                                 "/Fortnite.com/BattleRoyale/Matchmaking:TeamSize": "Solo",
+                                "/Fortnite.com/BattleRoyale/Matchmaking:BuildMode": "Build",
                                 "/Fortnite.com/Matchmaking:Region": "EU",
-                                "/Fortnite.com/Matchmaking:SquadFill": "NoFill"
+                                "/Fortnite.com/Matchmaking:MatchFill": "Public"
                             }
                         }),
                         "timestamp": 0,
                         "bUsingGracefulUpgrade": True,
                         "matchmakingId": uuid.uuid4().hex.upper()
                     },
-                    "worldSessionId": "",
-                    "travelId": "",
-                    "playlistVersion": 0,
-                    "maxMatchmakingDelay": 0,
+                    "readyStatus": "NotReady",
+                    "result": "None",
+                    "readyStatusMMId": "",
+                    "bHasOwnerStartedMM": False,
                     "flags": 0,
                     "priority": 1,
-                    "readyStatus": "NotReady",
-                    "readyStatusMMId": "",
-                    "result": "CanceledMemberError",
-                    "stayTogetherHash": 0
+                    "stayTogetherHash": 0,
+                    "forkHandle": "",
+                    "forkAccess": ""
                 }
             }),
             "Default:MatchmakingData1_j": json.dumps({
@@ -712,8 +742,7 @@ class PartyMemberMeta(MetaBase):
                     "location": "PreLobby",
                     "gameMode": "None",
                     "voiceChatStatus": "Enabled",
-                    "hasCompletedSTWTutorial": False,
-                    "hasPurchasedSTW": False,
+                    "hasCompletedSTWTutorial": True,
                     "platformSupportsSTW": True,
                     "bDownloadOnDemandActive": False,
                     "bIsPartyLFG": False,
@@ -722,7 +751,9 @@ class PartyMemberMeta(MetaBase):
                     "bIsInAllSelectExperiment": False,
                     "bAllowEmoteBeatSyncing": True,
                     "bUploadLogs": False,
-                    "eOSProductUserId": member.client.auth.eos_product_user_id
+                    "eOSProductUserId": member.client.auth.eos_product_user_id,
+                    "ePV": "1.0",
+                    "competitiveRegion": ""
                 }
             }),
             "Default:FORTStats_j": json.dumps({
@@ -748,16 +779,19 @@ class PartyMemberMeta(MetaBase):
             "Default:CampaignHero_j": json.dumps({
                 "CampaignHero": {
                     "heroItemInstanceId": "",
-                    "heroType": "/Game/Athena/Heroes/HID_001_Athena_Commando_F.HID_001_Athena_Commando_F"
+                    "heroType": "None"
                 }
             }),
             "Default:CampaignInfo_j": json.dumps({
                 "CampaignInfo": {
-                    "bIsMatchmakingIntoHestiaBeauty": False,
-                    "hestiaBeautySessionId": "",
                     "matchmakingLevel": 0,
                     "zoneInstanceId": "",
                     "homeBaseVersion": 1
+                }
+            }),
+            "Default:Extensions_j": json.dumps({
+                "Extensions": {
+                    "channels": {}
                 }
             }),
             "Default:FrontendMimosa_j": json.dumps({
@@ -914,32 +948,20 @@ class PartyMemberMeta(MetaBase):
                 }
             }),
             "Default:CrossplayPreference_s": "OptedIn",
-            "Default:JoinMethod_s": "Creation",
+            "Default:JoinMethod_s": "EpicParties",
             "Default:LoadoutMeta_j": json.dumps({
                 "LoadoutMeta": {
                     "enKeys": [],
-                    "force": 0,
-                    "rand": random.randint(100000000, 9999999999),
-                    "scratchpad": [],
+                    "rand": random.randint(100000000, 4294967295),
+                    "vAssets": [],
+                    "scratch": [],
                     "stats": [
-                        {
-                            "statName": "TotalVictoryCrowns",
-                            "statValue": 0
-                        },
-                        {
-                            "statName": "TotalRoyalRoyales",
-                            "statValue": 0
-                        },
-                        {
-                            "statName": "HasCrown",
-                            "statValue": 0
-                        },
-                        {
-                            "statName": "HabaneroProgression",
-                            "statValue": 0
-                        }
+                        "TotalVictoryCrowns:0",
+                        "TotalRoyalRoyales:0",
+                        "HasCrown:0",
+                        "UsePremiumColors:0"
                     ],
-                    "vAssets": []
+                    "force": 0
                 }
             }),
             "Default:JoinInProgressData_j": json.dumps({
@@ -1046,29 +1068,26 @@ class PartyMemberMeta(MetaBase):
 
     @property
     def scratchpad(self) -> list:
-        base = self.get_prop('Default:LoadoutMeta_j')
-        return base['LoadoutMeta'].get('scratchpad', [])
+        base = self.get_prop('Default:LoadoutMeta_j')['LoadoutMeta']
+        return base.get('scratch', base.get('scratchpad', []))
+
+    def _loadout_stat(self, name: str) -> int:
+        stats = self.get_prop('Default:LoadoutMeta_j')['LoadoutMeta'].get(
+            'stats', []
+        )
+        return _read_loadout_stat(stats, name)
 
     @property
-    def has_crown(self) -> list:
-        base = self.get_prop('Default:LoadoutMeta_j')
-        return base['LoadoutMeta'].get(
-            'stats', [{}, {}, {"statName": "HasCrown", "statValue": 0}, {}]
-        )[3]['statValue']
+    def has_crown(self) -> int:
+        return self._loadout_stat('HasCrown')
 
     @property
-    def victory_crowns(self) -> list:
-        base = self.get_prop('Default:LoadoutMeta_j')
-        return base['LoadoutMeta'].get(
-            'stats', [{}, {"statName": "TotalRoyalRoyales", "statValue": 0}, {}, {}]
-        )[2]['statValue']
+    def victory_crowns(self) -> int:
+        return self._loadout_stat('TotalRoyalRoyales')
 
     @property
-    def rank(self) -> list:
-        base = self.get_prop('Default:LoadoutMeta_j')
-        return base['LoadoutMeta'].get(
-            'stats', [{}, {}, {}, {"statName": "HabaneroProgression", "statValue": 0}]
-        )[0]['statValue']
+    def rank(self) -> int:
+        return self._loadout_stat('HabaneroProgression')
 
     @property
     def emote(self) -> str:
@@ -1366,13 +1385,17 @@ class PartyMemberMeta(MetaBase):
                 del mp_loadout['mm']
             mp_loadout['mm']['i'] = self.maybesub(sidekick)
         if scratchpad is not None:
-            data['scratchpad'] = scratchpad
+            data.pop('scratchpad', None)
+            data['scratch'] = scratchpad
+        stats = data.get('stats', [])
         if has_crown is not None:
-            data['stats'][2]['statValue'] = has_crown
+            stats = _write_loadout_stat(stats, 'HasCrown', has_crown)
         if victory_crowns is not None:
-            data['stats'][1]['statValue'] = victory_crowns
+            stats = _write_loadout_stat(stats, 'TotalRoyalRoyales',
+                                        victory_crowns)
         if rank is not None:
-            data['stats'][4]['statValue'] = rank
+            stats = _write_loadout_stat(stats, 'HabaneroProgression', rank)
+        data['stats'] = stats
 
         mp_final = {'MpLoadout1': {"s": mp_loadout}}
         mp_key = 'Default:MpLoadout1_j'
@@ -1454,19 +1477,57 @@ class PartyMemberMeta(MetaBase):
         data = (self.get_prop('Default:MatchmakingInfo_j'))['MatchmakingInfo']
 
         island = json.loads(data['islandSelection']['island'])
+        v2 = island.get('MatchmakingSettingsV2') or {}
+        v1 = island.get('MatchmakingSettingsV1') or {}
+        region = (v2.get('/Fortnite.com/Matchmaking:Region')
+                  or v1.get('regionId') or 'EU')
 
         if playlist:
-            island['LinkId'] = playlist
-            if "solo" in playlist.lower():
-                island['MatchmakingSettingsV2']['/Fortnite.com/BattleRoyale/Matchmaking:TeamSize'] = 'Solo'
-            elif "duo" in playlist.lower():
-                island['MatchmakingSettingsV2']['/Fortnite.com/BattleRoyale/Matchmaking:TeamSize'] = 'Duo'
-            elif "trio" in playlist.lower():
-                island['MatchmakingSettingsV2']['/Fortnite.com/BattleRoyale/Matchmaking:TeamSize'] = 'Trio'
-            elif "squad" in playlist.lower():
-                island['MatchmakingSettingsV2']['/Fortnite.com/BattleRoyale/Matchmaking:TeamSize'] = 'Squad'
-        if version:
-            data['playlistVersion'] = version
+            low = playlist.lower()
+            if low.startswith('playlist_'):
+                island = {
+                    'LinkId': low,
+                    'Session': island.get('Session') or {
+                        'iD': '',
+                        'joinInfo': {
+                            'joinability': 'CanNotBeJoinedOrWatched',
+                            'sessionKey': ''
+                        }
+                    },
+                    'MatchmakingSettingsV1': {
+                        'world': {
+                            'iD': '',
+                            'ownerId': 'INVALID',
+                            'name': '',
+                            'bIsJoinable': False
+                        },
+                        'productModes': [],
+                        'privacy': 'NoFill',
+                        'regionId': region
+                    }
+                }
+                data['islandSelection']['bUsingGracefulUpgrade'] = False
+            else:
+                island.pop('MatchmakingSettingsV1', None)
+                settings = {
+                    '/Fortnite.com/Matchmaking:SquadFill': 'NoFill',
+                    '/Fortnite.com/Matchmaking:Ranked': 'Unranked',
+                    '/Fortnite.com/BattleRoyale/Matchmaking:TeamSize': 'Solo',
+                    '/Fortnite.com/BattleRoyale/Matchmaking:BuildMode': 'Build',
+                    '/Fortnite.com/Matchmaking:Region': region,
+                    '/Fortnite.com/Matchmaking:MatchFill': 'Public',
+                    **v2,
+                }
+                team_key = '/Fortnite.com/BattleRoyale/Matchmaking:TeamSize'
+                for word, size in (('solo', 'Solo'), ('duo', 'Duo'),
+                                   ('trio', 'Trio'), ('squad', 'Squad')):
+                    if word in low:
+                        settings[team_key] = size
+                        break
+                island['LinkId'] = playlist
+                island['MatchmakingSettingsV2'] = settings
+                data['islandSelection']['bUsingGracefulUpgrade'] = True
+        data.pop('playlistVersion', None)
 
         data['islandSelection']['island'] = json.dumps(island)
         data['islandSelection']['timestamp'] = int(datetime.datetime.now(
@@ -1559,12 +1620,16 @@ class PartyMeta(MetaBase):
         }
 
         self.schema = {
-            "urn:epic:cfg:presence-perm_s": "Anyone",
             "urn:epic:cfg:invite-perm_s": "Anyone",
             "urn:epic:cfg:accepting-members_b": "true",
             "Default:PrimaryGameSessionId_s": "",
             "Default:PartyState_s": "BattleRoyaleView",
-            "Default:bLeaderUnavail_b": "false",
+            "Default:LeaderData_j": json.dumps({
+                "LeaderData": {
+                    "bLeaderUnavail": False,
+                    "epicPartyId": ""
+                }
+            }),
             "Default:CampaignInfo_j": json.dumps({
                 "CampaignInfo": {
                     "lobbyConnectionStarted": False,
@@ -1576,9 +1641,12 @@ class PartyMeta(MetaBase):
                     "tileStates": {
                         "tileStates": [],
                         "numSetBits": 0
-                    }
+                    },
+                    "allowSittingOutPlayersToJumpIn": True
                 }
             }),
+            "Default:CompetitiveRegion_s": "",
+            "Default:PartyRollbackFlags_U": "160",
             "Default:ZoneInstanceId_s": "",
             "Default:CreativeDiscoverySurfaceRevisions_j": json.dumps({
                 "CreativeDiscoverySurfaceRevisions": []
@@ -1598,11 +1666,9 @@ class PartyMeta(MetaBase):
             }),
             "Default:PartyIsJoinedInProgress_b": "false",
             "Default:GameSessionKey_s": "",
-            "Default:HestiaBeautyGameSessionId_s": "",
             "Default:AllowJoinInProgress_b": "false",
-            "Default:MatchmakingDelay_U": "0",
             "Default:CreativeInGameReadyCheckStatus_s": "None",
-            "Default:PreferredPrivacy_s": "NoFill",
+            "Default:PreferredPrivacy_s": "Private",
             "Default:LFGTime_s": "0001-01-01T00:00:00.000Z",
             "Default:SquadInformation_j": json.dumps({
                 "SquadInformation": {
@@ -1712,11 +1778,6 @@ class PartyMeta(MetaBase):
             updated[key] = self.set_prop(key, {
                 'PrivacySettings': new_privacy
             })
-
-        updated['urn:epic:cfg:presence-perm_s'] = self.set_prop(
-            'urn:epic:cfg:presence-perm_s',
-            privacy['presencePermission'],
-        )
 
         updated['urn:epic:cfg:accepting-members_b'] = self.set_prop(
             'urn:epic:cfg:accepting-members_b',
