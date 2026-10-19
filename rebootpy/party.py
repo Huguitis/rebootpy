@@ -1007,63 +1007,71 @@ class PartyMemberMeta(MetaBase):
         return base['MpLoadout1']['s']
 
     @property
+    def cosmetic_loadout(self) -> dict:
+        try:
+            extra = self.get_prop('Default:MpLoadout2_j')['MpLoadout2']['s']
+        except (KeyError, TypeError, ValueError):
+            extra = {}
+        return {**extra, **self.mp_loadout}
+
+    @property
     def outfit(self) -> str:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('ac', {}).get('i', 'None')
 
     @property
     def backpack(self) -> str:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('ab', {}).get('i', 'None')
 
     @property
     def pickaxe(self) -> str:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('ap', {}).get('i', 'None')
     
     @property
     def kicks(self) -> str:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('as', {}).get('i', 'None')
 
     @property
     def contrail(self) -> str:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('at', {}).get('i', 'None')
 
     @property
     def sidekick(self) -> str:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('mm', {}).get('i', 'None')
 
     @property
     def outfit_variants(self) -> List[Dict[str, str]]:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('ac', {}).get('v', [])
 
     @property
     def backpack_variants(self) -> List[Dict[str, str]]:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('ab', {}).get('v', [])
 
     @property
     def pickaxe_variants(self) -> List[Dict[str, str]]:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('ap', {}).get('v', [])
 
     @property
     def kicks_variants(self) -> List[Dict[str, str]]:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('as', {}).get('v', [])
 
     @property
     def contrail_variants(self) -> List[Dict[str, str]]:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('at', {}).get('v', [])
 
     @property
     def sidekick_variants(self) -> List[Dict[str, str]]:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
         return base.get('mm', {}).get('v', [])
 
     @property
@@ -1101,7 +1109,7 @@ class PartyMemberMeta(MetaBase):
 
     @property
     def banner(self) -> Tuple[str, str, int]:
-        base = self.mp_loadout
+        base = self.cosmetic_loadout
 
         return (
             base.get('li', {}).get('i', 'None'),
