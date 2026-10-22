@@ -95,10 +95,15 @@ class StartContext:
             self.client._start(dispatch_ready=self.dispatch_ready)
         )
 
-        await asyncio.wait(
-            (asyncio.create_task(self.client.wait_until_ready()), task),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        ready = asyncio.create_task(self.client.wait_until_ready())
+        try:
+            await asyncio.wait(
+                (ready, task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not ready.done():
+                ready.cancel()
 
         return task
 
@@ -135,9 +140,10 @@ async def _start_client(client: 'BasicClient', *,
         except Exception as e:
             return e
 
+    ready_task = loop.create_task(client.wait_until_ready())
     tasks = (
         loop.create_task(starter()),
-        loop.create_task(client.wait_until_ready())
+        ready_task,
     )
     try:
         done, pending = await asyncio.wait(
@@ -148,6 +154,8 @@ async def _start_client(client: 'BasicClient', *,
         for task in tasks:
             task.cancel()
     else:
+        if not ready_task.done():
+            ready_task.cancel()
         done_task = done.pop()
         e = done_task.result()
         if e is not None:
