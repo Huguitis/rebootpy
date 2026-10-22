@@ -431,6 +431,7 @@ class XMPPClient:
 
                 self.client.dispatch_event('friend_request_decline', pf)
         else:
+            self.client._unresolved_friend_ids.discard(_id)
             f = self.client.get_friend(_id)
             if f is not None:
                 self.client.store_user(f.get_raw())

@@ -1587,6 +1587,9 @@ class BasicClient:
             Something went wrong when trying to remove this friend.
         """
         await self.http.friends_remove_or_decline(user_id)
+        # Epic sends no removal event for a friendship we never had a Friend
+        # object for.
+        self._unresolved_friend_ids.discard(user_id)
 
     async def dispatch_and_wait_event(self, event: str,
                                       *args: Any,
@@ -2915,6 +2918,10 @@ class Client(BasicClient):
         self._pending_friends = {}
         self._blocked_users = {}
         self._presences = {}
+        # Accepted friendships whose account Epic no longer returns (deleted
+        # accounts). They are not in `friends`, but Epic counts them against
+        # the friends limit.
+        self._unresolved_friend_ids = set()
 
         self._join_party_lock = None
         self._internal_join_party_lock = None
@@ -3026,6 +3033,21 @@ class Client(BasicClient):
     def friend_count(self) -> int:
         """:class:`int`: The amount of friends the bot currently has."""
         return len(self._friends)
+
+    @property
+    def unresolved_friend_ids(self) -> List[str]:
+        """List[:class:`str`]: Ids of accepted friendships whose account Epic
+        no longer returns (typically deleted accounts). They are left out of
+        :attr:`friends`, but still count against Epic's friends limit.
+        """
+        return list(self._unresolved_friend_ids)
+
+    @property
+    def friendship_count(self) -> int:
+        """:class:`int`: How many friendships Epic counts against the friends
+        limit: :attr:`friend_count` plus :attr:`unresolved_friend_ids`.
+        """
+        return len(self._friends) + len(self._unresolved_friend_ids)
 
     @property
     def pending_friends(self) -> List[Union[IncomingPendingFriend,
@@ -3237,6 +3259,7 @@ class Client(BasicClient):
         self._pending_friends.clear()
         self._blocked_users.clear()
         self._presences.clear()
+        self._unresolved_friend_ids.clear()
 
     async def _close(self, *,
                      close_http: bool = True,
@@ -4301,6 +4324,7 @@ class Client(BasicClient):
         self._friends.clear()
         self._pending_friends.clear()
         self._blocked_users.clear()
+        self._unresolved_friend_ids.clear()
 
         tasks = (
             self.http.friends_get_all(
@@ -4338,6 +4362,10 @@ class Client(BasicClient):
             try:
                 data = users[friend['accountId']]
             except KeyError:
+                # No account data (a deleted account): it can't be a Friend
+                # object, but Epic still counts the friendship.
+                if friend['status'] == 'ACCEPTED':
+                    self._unresolved_friend_ids.add(friend['accountId'])
                 continue
 
             if friend['status'] == 'ACCEPTED':
