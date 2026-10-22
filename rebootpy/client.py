@@ -1590,6 +1590,7 @@ class BasicClient:
         # Epic sends no removal event for a friendship we never had a Friend
         # object for.
         self._unresolved_friend_ids.discard(user_id)
+        self._unresolved_outgoing_ids.discard(user_id)
 
     async def dispatch_and_wait_event(self, event: str,
                                       *args: Any,
@@ -2918,10 +2919,14 @@ class Client(BasicClient):
         self._pending_friends = {}
         self._blocked_users = {}
         self._presences = {}
-        # Accepted friendships whose account Epic no longer returns (deleted
+        # Accepted friendships whose account Epic no longer returns (inactive
         # accounts). They are not in `friends`, but Epic counts them against
-        # the friends limit.
+        # the friends limit. Same for requests we sent to such accounts.
         self._unresolved_friend_ids = set()
+        self._unresolved_outgoing_ids = set()
+        # Epic's verdict on the friends limits, from the summary fetched at
+        # login: {'incoming': bool, 'outgoing': bool, 'accepted': bool}.
+        self.friend_limits = {}
 
         self._join_party_lock = None
         self._internal_join_party_lock = None
@@ -3048,6 +3053,23 @@ class Client(BasicClient):
         limit: :attr:`friend_count` plus :attr:`unresolved_friend_ids`.
         """
         return len(self._friends) + len(self._unresolved_friend_ids)
+
+    @property
+    def unresolved_outgoing_ids(self) -> List[str]:
+        """List[:class:`str`]: Ids of pending requests the client sent to
+        accounts Epic no longer returns. Left out of
+        :attr:`outgoing_pending_friends`, but counted by Epic against the
+        outgoing requests limit.
+        """
+        return list(self._unresolved_outgoing_ids)
+
+    @property
+    def outgoing_request_count(self) -> int:
+        """:class:`int`: How many pending sent requests Epic counts against
+        the outgoing requests limit.
+        """
+        return (len(self.outgoing_pending_friends)
+                + len(self._unresolved_outgoing_ids))
 
     @property
     def pending_friends(self) -> List[Union[IncomingPendingFriend,
@@ -3260,6 +3282,7 @@ class Client(BasicClient):
         self._blocked_users.clear()
         self._presences.clear()
         self._unresolved_friend_ids.clear()
+        self._unresolved_outgoing_ids.clear()
 
     async def _close(self, *,
                      close_http: bool = True,
@@ -4325,6 +4348,7 @@ class Client(BasicClient):
         self._pending_friends.clear()
         self._blocked_users.clear()
         self._unresolved_friend_ids.clear()
+        self._unresolved_outgoing_ids.clear()
 
         tasks = (
             self.http.friends_get_all(
@@ -4366,6 +4390,8 @@ class Client(BasicClient):
                 # object, but Epic still counts the friendship.
                 if friend['status'] == 'ACCEPTED':
                     self._unresolved_friend_ids.add(friend['accountId'])
+                elif friend.get('direction') == 'OUTBOUND':
+                    self._unresolved_outgoing_ids.add(friend['accountId'])
                 continue
 
             if friend['status'] == 'ACCEPTED':
@@ -4376,6 +4402,9 @@ class Client(BasicClient):
                     self.store_incoming_pending_friend({**friend, **data})
                 else:
                     self.store_outgoing_pending_friend({**friend, **data})
+
+        limits = raw_summary.get('limitsReached')
+        self.friend_limits = dict(limits) if isinstance(limits, dict) else {}
 
         for data in raw_summary['friends']:
             friend = self.get_friend(data['accountId'])

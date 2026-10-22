@@ -408,6 +408,8 @@ class XMPPClient:
         else:
             _id = body['from']
 
+        self.client._unresolved_outgoing_ids.discard(_id)
+
         if body['reason'] == 'ABORTED':
             pf = self.client.get_pending_friend(_id)
             if pf is not None:
