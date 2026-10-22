@@ -907,7 +907,12 @@ class XMPPClient:
                     timeout=1
                 )
             except asyncio.TimeoutError:
-                party_data = await self.client.http.party_lookup(party.id)
+                try:
+                    party_data = await self.client.http.party_lookup(party.id)
+                except HTTPException:
+                    return
+                if self.client.party is not party:
+                    return
                 for m_data in party_data['members']:
                     if user_id == m_data['account_id']:
                         member = (await party._update_members(
