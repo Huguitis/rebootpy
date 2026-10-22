@@ -2254,6 +2254,15 @@ class HTTPClient:
             raise ChatError("Client is in a party alone.")
 
         epic_party_id = self.client.party.epic_party_id
+        if not epic_party_id:
+            match = re.match(
+                r'^([0-9a-f]{32})-\d*-default$',
+                self.client.party.id or '',
+                re.IGNORECASE,
+            )
+            if match:
+                epic_party_id = match.group(1)
+
         if epic_party_id:
             scope = '_'
             addressed = f'ep-{epic_party_id}'
