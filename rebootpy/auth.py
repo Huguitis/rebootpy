@@ -32,6 +32,7 @@ import time
 import webbrowser
 import secrets
 import base64
+import random
 
 from random import randint
 from aioconsole import ainput
@@ -300,8 +301,14 @@ class Auth:
         min_expires_at = min(expires)
 
         subtracted = min_expires_at - datetime.datetime.now(datetime.timezone.utc)
-        self.token_timeout = (subtracted).total_seconds() - 300
-        await asyncio.sleep(self.token_timeout)
+        # Refresh 5 to 15 minutes before the first token expires. Clients
+        # started together (every bot of a process at boot) would otherwise
+        # all refresh, and reopen their XMPP and STOMP connections, in the
+        # same second, for as long as they run.
+        self.token_timeout = (
+            subtracted.total_seconds() - 300 - random.uniform(0, 600)
+        )
+        await asyncio.sleep(max(self.token_timeout, 0))
 
     async def run_refresh_loop(self) -> None:
         loop = self.client.loop

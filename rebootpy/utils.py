@@ -29,6 +29,9 @@ import datetime
 import re
 import copy
 import json
+import random
+
+import aiohttp
 
 from typing import Optional
 
@@ -186,3 +189,27 @@ def recursive_decode(value: dict) -> dict:
             ]
 
     return duplicate
+
+
+def reconnect_delay(attempt: int, base: float = 5,
+                    cap: float = 300) -> float:
+    """Seconds to wait before reconnect attempt ``attempt`` (0-based):
+    exponential up to ``cap``, with jitter so that the many clients of one
+    process, all dropped by the same Epic outage, don't come back in lockstep.
+    """
+    return min(cap, base * 2 ** attempt) * random.uniform(0.5, 1.0)
+
+
+def describe_connect_error(exc: Optional[BaseException]) -> Optional[str]:
+    """A short, log-safe description of why a connection failed.
+
+    Never use ``repr()`` of an aiohttp error here: its ``request_info``
+    carries the request headers, bearer token included.
+    """
+    if exc is None:
+        return None
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return f'HTTP {exc.status} {exc.message}'.strip()
+    if isinstance(exc, asyncio.TimeoutError):
+        return 'timed out'
+    return f'{type(exc).__name__}: {exc}' if str(exc) else type(exc).__name__

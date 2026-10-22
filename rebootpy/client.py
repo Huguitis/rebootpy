@@ -40,7 +40,8 @@ from cryptography.hazmat.primitives import serialization
 from .errors import (PartyError, HTTPException, NotFound, Forbidden,
                      DuplicateFriendship, FriendshipRequestAlreadySent,
                      MaxFriendshipsExceeded, InviteeMaxFriendshipsExceeded,
-                     InviteeMaxFriendshipRequestsExceeded, PartyIsFull)
+                     InviteeMaxFriendshipRequestsExceeded, PartyIsFull,
+                     XMPPError, STOMPError)
 from .xmpp import XMPPClient
 from .websocket import WebsocketClient
 from .http import HTTPClient
@@ -60,7 +61,8 @@ from .presence import Presence
 from .auth import Auth, RefreshTokenAuth
 from .avatar import Avatar
 from .typedefs import MaybeCoro, DatetimeOrTimestamp, StrOrInt
-from .utils import LockEvent, MaybeLock, from_iso, to_iso, is_display_name
+from .utils import (LockEvent, MaybeLock, from_iso, to_iso, is_display_name,
+                    reconnect_delay)
 
 log = logging.getLogger(__name__)
 
@@ -1597,6 +1599,18 @@ class BasicClient:
                 return_when=asyncio.ALL_COMPLETED
             )
 
+        # A handler's failure doesn't fail the dispatch, but it must not
+        # vanish either: hand it to the loop's exception handler (where
+        # applications filter or log it) instead of letting the garbage
+        # collector report it as "Task exception was never retrieved".
+        for task in tasks:
+            if task.cancelled() or task.exception() is None:
+                continue
+            self.loop.call_exception_handler({
+                'message': f'Unhandled exception in {event!r} handler',
+                'exception': task.exception(),
+            })
+
     def _dispatcher(self, coro: Awaitable,
                     *args: Any,
                     **kwargs: Any) -> asyncio.Future:
@@ -2931,6 +2945,7 @@ class Client(BasicClient):
         self._chat_is_reportable: Dict[str, bool] = {}
 
         self._reconnecting_to_party = False
+        self._xmpp_reconnect_task = None
 
         self.setup_internal()
 
@@ -3093,15 +3108,41 @@ class Client(BasicClient):
         self._check_party_confirmation()
 
     async def internal_auth_refresh_handler(self):
-        self._reconnecting_to_party = True
+        # Both connections are reopened with the new tokens. Epic's connect
+        # service has outages (502s from its load balancer), so a connection
+        # that still fails after a few tries is handed to a background
+        # reconnect instead of failing the refresh: before, the client was
+        # left without it, silently, until the next refresh hours later.
+        if self._closing:
+            return
+
+        log.debug('Refreshing xmpp session')
         try:
-            log.debug('Refreshing xmpp session')
             await self.xmpp._close()
             await self.xmpp.run()
+        except XMPPError as exc:
+            log.warning(f'[{self._log_name()}] {exc}; retrying in the '
+                        'background')
+            self._schedule_xmpp_reconnect()
 
-            log.debug('Refreshing websocket session')
-            await self.websocket.close()
-            await self.websocket.run()
+        log.debug('Refreshing websocket session')
+        try:
+            await self.websocket.connect()
+        except STOMPError as exc:
+            # The reconnect restores the party once it is back.
+            log.warning(f'[{self._log_name()}] {exc}; retrying in the '
+                        'background')
+            self.websocket.schedule_reconnect(str(exc))
+            return
+
+        await self._restore_party_connection()
+
+    async def _restore_party_connection(self) -> None:
+        """Puts the party back on a new STOMP connection. Its connection id
+        changed, so the Epic party has to be rebound to it, or rejoined.
+        """
+        self._reconnecting_to_party = True
+        try:
             epic_party_rebound = await self.rebind_epic_party_connection()
 
             await asyncio.sleep(2)
@@ -3119,10 +3160,37 @@ class Client(BasicClient):
                         await self._create_party()
                     except Exception as exc:
                         log.debug(f'party create after reconnect failed: {exc}')
-        except AttributeError:
-            pass
         finally:
             self._reconnecting_to_party = False
+
+    def _schedule_xmpp_reconnect(self) -> None:
+        task = self._xmpp_reconnect_task
+        if self._closing or (task is not None and not task.done()):
+            return
+        self._xmpp_reconnect_task = self.loop.create_task(
+            self._xmpp_reconnect_loop()
+        )
+
+    async def _xmpp_reconnect_loop(self) -> None:
+        attempt = 0
+        while not self._closing and not self.is_closed():
+            await asyncio.sleep(reconnect_delay(attempt))
+            if self._closing or self.is_closed():
+                return
+            try:
+                await self.xmpp._close()
+                await self.xmpp.run()
+            except XMPPError as exc:
+                attempt += 1
+                log.debug(f'XMPP reconnect attempt {attempt} failed: {exc}')
+                continue
+            log.warning(f'[{self._log_name()}] XMPP reconnected after '
+                        f'{attempt + 1} attempt(s)')
+            return
+
+    def _log_name(self) -> str:
+        user = getattr(self, 'user', None)
+        return getattr(user, 'display_name', None) or 'unknown account'
 
     async def _start(self, dispatch_ready: bool = True) -> None:
         if self._first_start:
@@ -3146,7 +3214,7 @@ class Client(BasicClient):
             ),
             self.refresh_caches(priority=priority),
             self.xmpp.run(),
-            self.websocket.run(),
+            self.websocket.connect(),
         )
 
         # These are here in-case someone just has logging for rebootpy.client
@@ -3177,6 +3245,10 @@ class Client(BasicClient):
         self._closing = True
 
         self.stop_epic_party_service()
+
+        if self._xmpp_reconnect_task is not None:
+            self._xmpp_reconnect_task.cancel()
+            self._xmpp_reconnect_task = None
 
         if self.leave_party_at_shutdown:
             try:

@@ -37,17 +37,20 @@ import base64
 from xml.etree import ElementTree
 from collections import defaultdict
 from typing import TYPE_CHECKING, Optional, Union, Awaitable, Any, Tuple
-from .errors import HTTPException
+from .errors import HTTPException, XMPPError
 from .party import (Party, PartyJoinRequest, ReceivedPartyInvitation,
                     PartyJoinConfirmation)
 from .presence import Presence
 from .enums import AwayStatus
-from .utils import to_iso, from_iso
+from .utils import to_iso, from_iso, describe_connect_error
 
 if TYPE_CHECKING:
     from .client import Client
 
 log = logging.getLogger(__name__)
+
+# How long a new XMPP connection has to finish its handshake.
+XMPP_CONNECT_TIMEOUT = 30
 
 _party_meta_attrs = {'playlist_info': 'playlist', 'squad_fill': None,
                      'privacy': None}
@@ -1402,34 +1405,69 @@ class XMPPClient:
             return
 
         self.http_session = aiohttp.ClientSession()
-        self._xmpp_task = self.client.loop.create_task(self.connect_to_xmpp())
+        task = self._xmpp_task = self.client.loop.create_task(
+            self.connect_to_xmpp()
+        )
 
-        await self._xmpp_ready_event.wait()
+        # Waiting on the ready event alone hung forever when the connection
+        # failed (a 502 from Epic ends the connect task without retrying),
+        # and with it the auth refresh that called us.
+        ready = asyncio.ensure_future(self._xmpp_ready_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (ready, task),
+                timeout=XMPP_CONNECT_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            ready.cancel()
+
+        if ready in done:
+            return
+
+        if task.done():
+            cause = None if task.cancelled() else task.exception()
+            reason = (
+                describe_connect_error(cause)
+                or 'closed before it was ready'
+            )
+        else:
+            reason = f'not ready within {XMPP_CONNECT_TIMEOUT}s'
+
+        await self._close()
+        raise XMPPError(f'Could not connect to XMPP: {reason}')
 
     async def restart(self) -> None:
         if self._restarting:
             return
 
         self._restarting = True
+        try:
+            log.debug('Reconnecting to XMPP...')
 
-        log.debug('Reconnecting to XMPP...')
+            await self._close()
 
-        await self._close()
+            if self._xmpp_task:
+                self._xmpp_task.cancel()
+                try:
+                    await self._xmpp_task
+                except asyncio.CancelledError:
+                    pass
+                self._xmpp_task = None
 
-        if self._xmpp_task:
-            self._xmpp_task.cancel()
             try:
-                await self._xmpp_task
-            except asyncio.CancelledError:
-                pass
-            self._xmpp_task = None
+                await self.run()
+            except XMPPError as exc:
+                log.warning(f'[{self.client._log_name()}] {exc}; '
+                            'retrying in the background')
+                self.client._schedule_xmpp_reconnect()
+                return
 
-        await self.run()
-
-        await asyncio.sleep(2)
-        await self.client._reconnect_to_party()
-
-        self._restarting = False
+            await asyncio.sleep(2)
+            await self.client._reconnect_to_party()
+        finally:
+            # Left set by a failure, it made every later restart a no-op.
+            self._restarting = False
 
     async def _close(self, close_http: bool = True) -> None:
         log.debug('Attempting to close xmpp client')
