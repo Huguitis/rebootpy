@@ -4801,12 +4801,14 @@ class ClientParty(PartyBase, Patchable):
             for receiver_id, raw in list(
                 self.client._epic_party_sent_invites.items()
             ):
-                if raw.get('party_id') != self.epic_party_id:
-                    continue
-
+                # Expired invites go whatever party they were for: those of
+                # earlier parties were never dropped.
                 expires_at = raw.get('expires_at')
                 if expires_at and from_iso(expires_at) <= now:
                     del self.client._epic_party_sent_invites[receiver_id]
+                    continue
+
+                if raw.get('party_id') != self.epic_party_id:
                     continue
 
                 active.append((receiver_id, raw))

@@ -75,6 +75,13 @@ PARTY_BUILD_REFRESH_INTERVAL = 600
 # shared: one request per interval no matter how many clients are running.
 _live_build = {'net_cl': 0, 'checked_at': 0.0, 'task': None}
 
+# Client.accept_friend: how long to wait for Epic's friend-added notification
+# once the accept succeeded.
+ACCEPT_FRIEND_EVENT_TIMEOUT = 10
+
+# Leaving the party on close: past this, the close goes on without it.
+PARTY_LEAVE_TIMEOUT = 5
+
 
 class StartContext:
     def __init__(self, client: 'BasicClient',
@@ -1747,14 +1754,39 @@ class BasicClient:
             check = _check
 
         ev = (event.lower()).replace(self.event_prefix, '')
-        try:
-            listeners = self._listeners[ev]
-        except KeyError:
-            listeners = []
-            self._listeners[ev] = listeners
+        # Registered now, not when awaited, so an event dispatched in between
+        # is not missed.
+        entry = self._add_listener(ev, future, check)
+        return self._wait_for_listener(ev, entry, timeout)
 
-        listeners.append((future, check))
-        return asyncio.wait_for(future, timeout)
+    def _add_listener(self, ev: str, future: asyncio.Future,
+                      check: Callable) -> tuple:
+        entry = (future, check)
+        self._listeners.setdefault(ev, []).append(entry)
+        return entry
+
+    def _remove_listener(self, ev: str, entry: tuple) -> None:
+        # dispatch_event only drops a listener that resolved, or one still
+        # there the next time *that* event fires. A wait that timed out or
+        # was cancelled used to stay until then: for rarely dispatched
+        # events (friend_add on a full account) the list grew for as long as
+        # the client ran.
+        listeners = self._listeners.get(ev)
+        if listeners is None:
+            return
+        for i, item in enumerate(listeners):
+            if item is entry:
+                del listeners[i]
+                break
+        if not listeners:
+            self._listeners.pop(ev, None)
+
+    async def _wait_for_listener(self, ev: str, entry: tuple,
+                                 timeout: Optional[float]) -> Any:
+        try:
+            return await asyncio.wait_for(entry[0], timeout)
+        finally:
+            self._remove_listener(ev, entry)
 
     def _event_has_handler(self, event: str) -> bool:
         handlers = self._events.get(event.lower())
@@ -3296,28 +3328,66 @@ class Client(BasicClient):
             self._xmpp_reconnect_task.cancel()
             self._xmpp_reconnect_task = None
 
-        if self.leave_party_at_shutdown:
+        finished = False
+        try:
+            if self.leave_party_at_shutdown:
+                try:
+                    if self.party is not None:
+                        # Bounded: a slow leave (Epic throttling) used to use
+                        # up the caller's whole close timeout, and the
+                        # connections below were never closed.
+                        await asyncio.wait_for(
+                            self.party._leave(priority=priority),
+                            timeout=PARTY_LEAVE_TIMEOUT,
+                        )
+                except Exception:
+                    pass
+
             try:
-                if self.party is not None:
-                    await self.party._leave(priority=priority)
+                await self.xmpp.close()
             except Exception:
                 pass
 
-        try:
-            await self.xmpp.close()
-        except Exception:
-            pass
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
 
-        try:
-            await self.websocket.close()
-        except Exception:
-            pass
+            await super()._close(
+                close_http=close_http,
+                dispatch_close=dispatch_close,
+                priority=priority,
+            )
+            finished = True
+        finally:
+            if not finished:
+                self._abort_background_tasks()
 
-        await super()._close(
-            close_http=close_http,
-            dispatch_close=dispatch_close,
-            priority=priority,
+    def _abort_background_tasks(self) -> None:
+        """Stops, without awaiting anything, everything that keeps this client
+        running in the background: the XMPP and STOMP connections and their
+        loops, the token refresh and the party poll.
+
+        For a close that was cut short (its caller's timeout, a cancelled
+        task): those tasks kept running for a client nobody used any more,
+        and the event loop holding them kept the whole client - caches,
+        party, connections - in memory for good.
+        """
+        current = asyncio.current_task()
+        xmpp, ws = self.xmpp, self.websocket
+        tasks = (
+            self._epic_party_poll_task, self._xmpp_reconnect_task,
+            getattr(self, '_refresh_task', None),
+            xmpp._xmpp_task, xmpp._ping_task, xmpp._watchdog_task,
+            xmpp._presence_task, xmpp._reconnect_recover_task,
+            ws.ws_task, ws._heartbeat_task, ws._reconnect_task,
         )
+        for task in tasks:
+            if task is not None and not task.done() and task is not current:
+                task.cancel()
+        for session in (xmpp.http_session, ws.wss_session):
+            if session is not None and not session.closed:
+                self.loop.create_task(session.close())
 
     def recover_events(self, *,
                        refresh_caches: bool = False,
@@ -4191,6 +4261,13 @@ class Client(BasicClient):
         seen = self._epic_party_handled_invites.get(key)
         if seen and now - seen < 60:
             return
+        # Only the last minute matters; every join request ever received was
+        # kept before.
+        if len(self._epic_party_handled_invites) > 100:
+            self._epic_party_handled_invites = {
+                k: t for k, t in self._epic_party_handled_invites.items()
+                if now - t < 60
+            }
         self._epic_party_handled_invites[key] = now
 
         if self.party is None:
@@ -4685,8 +4762,9 @@ class Client(BasicClient):
 
         .. warning::
 
-            Do not use this method to send a friend request. It will then not
-            return until the friend request has been accepted by the user.
+            Do not use this method to send a friend request: it waits (up to
+            ``ACCEPT_FRIEND_EVENT_TIMEOUT`` seconds) for a friendship that only
+            begins once the other user accepts. Use :meth:`add_friend`.
 
         Accepts a request.
 
@@ -4715,10 +4793,24 @@ class Client(BasicClient):
         :class:`Friend`
             Object of the friend you just added.
         """
-        await super().add_friend(user_id)
-        friend = await self.wait_for('friend_add',
-                                     check=lambda f: f.id == user_id)
-        return friend
+        # Listening before the request: Epic's friend-added notification can
+        # arrive before its HTTP answer, and a wait registered after it never
+        # ended. Bounded too, for a notification that never comes (XMPP
+        # down): the friendship exists once the request succeeded.
+        entry = self._add_listener(
+            'friend_add', self.loop.create_future(),
+            lambda f: f.id == user_id,
+        )
+        try:
+            await super().add_friend(user_id)
+            try:
+                return await asyncio.wait_for(
+                    entry[0], ACCEPT_FRIEND_EVENT_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                return self.get_friend(user_id)
+        finally:
+            self._remove_listener('friend_add', entry)
 
     async def _reconnect_to_party(self, data: Optional[dict] = None) -> None:
         epic_party_id = self.party.epic_party_id if self.party else None
