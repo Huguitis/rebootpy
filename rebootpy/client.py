@@ -30,6 +30,7 @@ import base64
 import uuid
 import json
 
+import aiohttp
 from aiohttp import BaseConnector
 from typing import (Iterable, Union, Optional, Any, Awaitable, Callable, Dict,
                     List, Tuple)
@@ -3692,8 +3693,9 @@ class Client(BasicClient):
                 'rebound connection after STOMP reconnect'
             )
             return True
-        except HTTPException as e:
-            log.debug(f'connection rebind failed: {e}')
+        except (HTTPException, aiohttp.ClientError, OSError,
+                asyncio.TimeoutError) as e:
+            log.debug(f'connection rebind failed: {e!s}')
             return False
 
     async def send_eos_presence(self, raw_status: Optional[dict] = None,

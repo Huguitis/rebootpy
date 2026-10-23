@@ -24,6 +24,7 @@ SOFTWARE.
 
 import aiohttp
 import asyncio
+import errno
 import logging
 import json
 import re
@@ -43,6 +44,8 @@ if TYPE_CHECKING:
     from .client import Client
 
 log = logging.getLogger(__name__)
+
+_CONNECTION_RESET = {errno.ECONNRESET, 54, 104, 10054}
 
 GRAPHQL_HTML_ERROR_PATTERN = re.compile(
     r'<title>((\d+).*)<\/title>',
@@ -818,7 +821,7 @@ class HTTPClient:
                 await asyncio.sleep(0.5 + (tries - 1) * 2)
                 continue
             except OSError as exc:
-                if (exc.errno in (54, 10054)
+                if (exc.errno in _CONNECTION_RESET
                         and not self.client._closing
                         and tries < cfg.max_retry_attempts):
                     continue
