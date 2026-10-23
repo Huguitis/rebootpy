@@ -36,7 +36,7 @@ import uuid
 from typing import TYPE_CHECKING, Iterable, List, Optional, Any, Union, Tuple
 from urllib.parse import quote as urllibquote
 
-from .utils import MaybeLock, to_iso
+from .utils import MaybeLock, to_iso, json_loads
 from .errors import HTTPException, ChatError
 
 if TYPE_CHECKING:
@@ -127,6 +127,8 @@ class HTTPRetryConfig:
         self.backoff_start = kwargs.get('backoff_start', 1)
         self.backoff_factor = kwargs.get('backoff_factor', 1.5)
         self.backoff_cap = kwargs.get('backoff_cap', 20)
+
+        self.request_timeout = kwargs.get('request_timeout', 60)
 
 
 class GraphQLRequest:
@@ -443,7 +445,7 @@ class HTTPClient:
                                                                       dict]:
         text = await response.text(encoding='utf-8')
         if 'application/json' in response.headers.get('content-type', ''):
-            return json.loads(text)
+            return json_loads(text)
         return text
 
     @property
@@ -476,6 +478,10 @@ class HTTPClient:
     async def close(self) -> None:
         self._jar.clear()
         if self.__session:
+            if self.connector is not None:
+                await self.__session.close()
+                return
+
             event = create_aiohttp_closed_event(self.__session)
             await self.__session.close()
             try:
@@ -490,7 +496,10 @@ class HTTPClient:
         self.__session = aiohttp.ClientSession(
             connector=self.connector,
             connector_owner=self.connector is None,
-            cookie_jar=self._jar
+            cookie_jar=self._jar,
+            timeout=aiohttp.ClientTimeout(
+                total=self.retry_config.request_timeout
+            ),
         )
 
     async def request(self, method: str, url: str,
@@ -509,12 +518,9 @@ class HTTPClient:
 
         pre_time = time.time()
         async with self.__session.request(method, url, **kwargs) as r:
-            log.debug('{0} {1} has returned {2.status} in {3:.2f}s'.format(
-                method,
-                url,
-                r,
-                time.time() - pre_time
-            ))
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug('%s %s has returned %s in %.2fs', method, url,
+                          r.status, time.time() - pre_time)
 
             data = await self.json_or_text(r)
             return r, data
@@ -807,10 +813,14 @@ class HTTPClient:
                 raise
 
             except aiohttp.ServerDisconnectedError:
+                if self.client._closing or tries >= cfg.max_retry_attempts:
+                    raise
                 await asyncio.sleep(0.5 + (tries - 1) * 2)
                 continue
             except OSError as exc:
-                if exc.errno in (54, 10054):
+                if (exc.errno in (54, 10054)
+                        and not self.client._closing
+                        and tries < cfg.max_retry_attempts):
                     continue
                 raise
 

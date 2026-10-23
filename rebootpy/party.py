@@ -41,7 +41,7 @@ from .user import User
 from .friend import Friend
 from .enums import (PartyPrivacy, PartyDiscoverability, PartyJoinability,
                     DefaultCharactersChapter3, Region, ReadyState, Platform)
-from .utils import MaybeLock, to_iso, from_iso
+from .utils import MaybeLock, to_iso, from_iso, spawn
 from .stw import fort_mappings
 
 if TYPE_CHECKING:
@@ -2653,7 +2653,7 @@ class ClientPartyMember(PartyMemberBase, Patchable):
                 if exc.message_code != m:
                     raise
 
-        asyncio.ensure_future(patcher())
+        spawn(patcher())
 
     async def leave(self) -> 'ClientParty':
         """|coro|
@@ -4661,7 +4661,7 @@ class ClientParty(PartyBase, Patchable):
                 log.debug(f'Could not refresh squad assignments after '
                           f'becoming leader: {e}')
 
-        asyncio.ensure_future(refresh())
+        spawn(refresh())
 
     async def set_squad_assignments(self, assignments: Dict[PartyMember, SquadAssignment]) -> None:  # noqa
         """|coro|
@@ -5140,9 +5140,7 @@ class ReceivedPartyInvitation:
             raise PartyError('Incompatible net_cl')
 
         party = await self.client.join_legacy_party(self.party.id)
-        asyncio.ensure_future(
-            self.client.http.party_delete_ping(self.sender.id)
-        )
+        spawn(self.client.http.party_delete_ping(self.sender.id))
         return party
 
     async def decline(self) -> None:

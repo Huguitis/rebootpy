@@ -33,9 +33,39 @@ import random
 
 import aiohttp
 
-from typing import Optional
+from typing import Any, Optional, Union
+
+try:
+    import orjson
+except ImportError:
+    orjson = None
 
 uuid_match_comp = re.compile(r'^[a-f0-9]{32}$')
+
+
+_running_tasks = set()
+
+
+def spawn(aw) -> asyncio.Future:
+    task = asyncio.ensure_future(aw)
+    _running_tasks.add(task)
+    task.add_done_callback(_running_tasks.discard)
+    return task
+
+
+_LONG_NUMBER = re.compile(r'\d{19}')
+_LONG_NUMBER_BYTES = re.compile(rb'\d{19}')
+
+
+def json_loads(data: Union[str, bytes]) -> Any:
+    if orjson is not None:
+        pattern = _LONG_NUMBER_BYTES if isinstance(data, bytes) else _LONG_NUMBER
+        if not pattern.search(data):
+            try:
+                return orjson.loads(data)
+            except orjson.JSONDecodeError:
+                pass
+    return json.loads(data)
 
 
 class MaybeLock:
@@ -80,10 +110,26 @@ class LockEvent(asyncio.Lock):
         # Only set if no new acquire waiters exists. This is because we
         # don't want any wait()'s to return if there immediately will
         # be a new acquirer.
-        if not (self._waiters is not None and [w for w in self._waiters
-                                               if not w.cancelled()]):
-            self._event.set()
-            self.priority = 0
+        if self._has_waiters():
+            asyncio.get_running_loop().call_soon(self._settle)
+        else:
+            self._set_free()
+
+    def _has_waiters(self) -> bool:
+        return bool(self._waiters is not None and [w for w in self._waiters
+                                                   if not w.cancelled()])
+
+    def _set_free(self) -> None:
+        self._event.set()
+        self.priority = 0
+
+    def _settle(self) -> None:
+        if self.locked():
+            return
+        if self._has_waiters():
+            asyncio.get_running_loop().call_soon(self._settle)
+        else:
+            self._set_free()
 
 
 def from_iso(iso: str) -> datetime.datetime:

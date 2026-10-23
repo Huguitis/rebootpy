@@ -39,7 +39,7 @@ from typing import Optional
 from .message import FriendMessage, PartyMessage
 from .presence import Presence
 from .errors import STOMPError, HTTPException
-from .utils import reconnect_delay, describe_connect_error
+from .utils import reconnect_delay, describe_connect_error, json_loads, spawn
 
 from aiohttp import hdrs, helpers, client_reqrep, connector
 from aiohttp.http import StreamWriter, HttpVersion10, HttpVersion11
@@ -90,6 +90,8 @@ class WebsocketClient:
         self._eas_private_sub_id = None
 
         self.message_history = deque(maxlen=100)
+        self._seen_message_ids = set()
+        self._late_tasks = set()
 
     async def set_session(self) -> None:
         self.wss_session = aiohttp.ClientSession()
@@ -136,18 +138,26 @@ class WebsocketClient:
             key, value = line.split(':', 1)
             headers[key.strip()] = value.strip()
 
-        data = json.loads(raw_json[:-1]) if len(raw_json) >= 3 else {}
+        data = json_loads(raw_json[:-1]) if len(raw_json) >= 3 else {}
 
         if message_type == 'MESSAGE':
             message_id = data.get('id')
             if message_id:
-                if message_id in self.message_history:
+                if message_id in self._seen_message_ids:
                     return
-                self.message_history.append(message_id)
+                history = self.message_history
+                if len(history) == history.maxlen:
+                    self._seen_message_ids.discard(history[0])
+                history.append(message_id)
+                self._seen_message_ids.add(message_id)
 
-        log.debug(
-            f'{datetime.datetime.now(datetime.timezone.utc)} - Received websocket message with type'
-            f' {message_type} with the headers {headers} and body \n{data}.')
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                '%s - Received websocket message with type %s with the '
+                'headers %s and body \n%s.',
+                datetime.datetime.now(datetime.timezone.utc),
+                message_type, headers, data,
+            )
 
         if message_type == 'CONNECTED' and not self.heartbeat_started:
             self.heartbeat_started = True
@@ -220,7 +230,7 @@ class WebsocketClient:
             isinstance(data.get('type'), str) and
             data['type'].startswith('party.v2.')
         ):
-            asyncio.ensure_future(
+            spawn(
                 self.client.handle_epic_party_notification(
                     data['type'], data.get('payload') or {}
                 )
@@ -234,28 +244,15 @@ class WebsocketClient:
                 data['payload']['message']['senderId']
             )
             if author is None:
-                try:
-                    author = await self.client.wait_for(
-                        'friend_add',
-                        check=lambda f: f.id == data['payload']['message']
-                        ['senderId'],
-                        timeout=2
-                    )
-                except asyncio.TimeoutError:
-                    return
-
-            try:
-                decoded_content = decode_message_body(
-                    data['payload']['message']['body']
+                sender_id = data['payload']['message']['senderId']
+                waiter = self.client.wait_for(
+                    'friend_add',
+                    check=lambda f: f.id == sender_id,
+                    timeout=2
                 )
-                m = FriendMessage(
-                    client=self.client,
-                    author=author,
-                    content=decoded_content
-                )
-                self.client.dispatch_event('friend_message', m)
-            except ValueError:
-                pass
+                self._run_late(self._friend_message_later(waiter, data))
+            else:
+                self._dispatch_friend_message(author, data)
         elif (
             message_type == 'MESSAGE' and
             data.get('type') == 'social.chat.v1.NEW_MESSAGE' and
@@ -305,40 +302,14 @@ class WebsocketClient:
             user_id = data['payload']['accountId']
             friend = self.client.get_friend(user_id)
             if friend is None:
-                try:
-                    friend = await self.client.wait_for(
-                        'friend_add',
-                        check=lambda f: f.id == user_id,
-                        timeout=1
-                    )
-                except asyncio.TimeoutError:
-                    return
-
-            before_pres = friend.last_presence
-
-            _pres = Presence(
-                self.client,
-                data['payload'],
-                previous=before_pres,
-            )
-
-            # The presence cache only holds friends who are online (see
-            # Client.presences), so a friend going offline is pruned rather
-            # than stored. Otherwise is_online()/get_presence() would keep
-            # reporting them online until restart.
-            if _pres.available:
-                self.client._presences[user_id] = _pres
+                waiter = self.client.wait_for(
+                    'friend_add',
+                    check=lambda f: f.id == user_id,
+                    timeout=1
+                )
+                self._run_late(self._presence_later(waiter, data))
             else:
-                if before_pres is not None:
-                    friend._update_last_logout(
-                        datetime.datetime.now(datetime.timezone.utc)
-                    )
-                self.client._presences.pop(user_id, None)
-
-            if _pres.party is not None and _pres.party.net_cl:
-                self.client._note_presence_net_cl(_pres.party.net_cl)
-
-            self.client.dispatch_event('friend_presence', before_pres, _pres)
+                self._apply_presence(friend, data)
         elif message_type == 'ERROR':
             # Kept so that a connection Epic refuses reports why instead of
             # just timing out.
@@ -363,7 +334,68 @@ class WebsocketClient:
             isinstance(data.get('type'), str) and
             ('party' in data['type'].lower() or 'invite' in data['type'].lower())  # noqa
         ):
-            asyncio.ensure_future(self.client._epic_party_poll())
+            spawn(self.client._epic_party_poll())
+
+    def _run_late(self, coro) -> None:
+        task = self.client.loop.create_task(coro)
+        self._late_tasks.add(task)
+        task.add_done_callback(self._late_tasks.discard)
+
+    def _dispatch_friend_message(self, author, data: dict) -> None:
+        try:
+            decoded_content = decode_message_body(
+                data['payload']['message']['body']
+            )
+            m = FriendMessage(
+                client=self.client,
+                author=author,
+                content=decoded_content
+            )
+            self.client.dispatch_event('friend_message', m)
+        except ValueError:
+            pass
+
+    async def _friend_message_later(self, waiter, data: dict) -> None:
+        try:
+            author = await waiter
+        except asyncio.TimeoutError:
+            return
+        self._dispatch_friend_message(author, data)
+
+    async def _presence_later(self, waiter, data: dict) -> None:
+        try:
+            friend = await waiter
+        except asyncio.TimeoutError:
+            return
+        self._apply_presence(friend, data)
+
+    def _apply_presence(self, friend, data: dict) -> None:
+        user_id = data['payload']['accountId']
+        before_pres = friend.last_presence
+
+        _pres = Presence(
+            self.client,
+            data['payload'],
+            previous=before_pres,
+        )
+
+        # The presence cache only holds friends who are online (see
+        # Client.presences), so a friend going offline is pruned rather
+        # than stored. Otherwise is_online()/get_presence() would keep
+        # reporting them online until restart.
+        if _pres.available:
+            self.client._presences[user_id] = _pres
+        else:
+            if before_pres is not None:
+                friend._update_last_logout(
+                    datetime.datetime.now(datetime.timezone.utc)
+                )
+            self.client._presences.pop(user_id, None)
+
+        if _pres.party is not None and _pres.party.net_cl:
+            self.client._note_presence_net_cl(_pres.party.net_cl)
+
+        self.client.dispatch_event('friend_presence', before_pres, _pres)
 
     async def connect_to_websocket(self) -> None:
         headers = {

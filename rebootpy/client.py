@@ -62,7 +62,7 @@ from .auth import Auth, RefreshTokenAuth
 from .avatar import Avatar
 from .typedefs import MaybeCoro, DatetimeOrTimestamp, StrOrInt
 from .utils import (LockEvent, MaybeLock, from_iso, to_iso, is_display_name,
-                    reconnect_delay)
+                    reconnect_delay, spawn)
 
 log = logging.getLogger(__name__)
 
@@ -1633,7 +1633,7 @@ class BasicClient:
     def _dispatcher(self, coro: Awaitable,
                     *args: Any,
                     **kwargs: Any) -> asyncio.Future:
-        return asyncio.ensure_future(coro(*args, **kwargs))
+        return spawn(coro(*args, **kwargs))
 
     def dispatch_event(self, event: str,
                        *args: Any,
@@ -2980,6 +2980,10 @@ class Client(BasicClient):
         self.epic_party_poll_interval = kwargs.get(
             'epic_party_poll_interval', 2.0
         )
+        self.epic_party_user_poll_interval = kwargs.get(
+            'epic_party_user_poll_interval', 15.0
+        )
+        self._epic_party_last_full_poll = 0.0
 
         self._epic_party_poll_task = None
         self._epic_party_poll_in_flight = False
@@ -3388,6 +3392,7 @@ class Client(BasicClient):
             getattr(self, '_refresh_task', None),
             xmpp._xmpp_task, xmpp._ping_task, xmpp._watchdog_task,
             xmpp._presence_task, xmpp._reconnect_recover_task,
+            xmpp._restart_task,
             ws.ws_task, ws._heartbeat_task, ws._reconnect_task,
         )
         for task in tasks:
@@ -3395,7 +3400,7 @@ class Client(BasicClient):
                 task.cancel()
         for session in (xmpp.http_session, ws.wss_session):
             if session is not None and not session.closed:
-                self.loop.create_task(session.close())
+                spawn(session.close())
 
     def recover_events(self, *,
                        refresh_caches: bool = False,
@@ -3539,7 +3544,7 @@ class Client(BasicClient):
         if value <= max(self._parse_net_cl(self.net_cl), _live_build['net_cl']):
             return
 
-        self.loop.create_task(self.refresh_party_build(max_age=60))
+        spawn(self.refresh_party_build(max_age=60))
 
     def _lobby_id_from_presences(self, epic_party_id: str) -> Optional[str]:
         """The lobby a friend already in ``epic_party_id`` advertises, if any.
@@ -3992,10 +3997,13 @@ class Client(BasicClient):
             self._join_party_lock.release()
             await self._create_party(acquire=False)
             raise
+        except BaseException:
+            self._join_party_lock.release()
+            raise
         else:
             self._join_party_lock.release()
 
-        asyncio.ensure_future(self._ensure_member_meta_sent(party))
+        spawn(self._ensure_member_meta_sent(party))
         return party
 
     async def _ensure_member_meta_sent(self, party: ClientParty,
@@ -4087,7 +4095,14 @@ class Client(BasicClient):
     async def _epic_party_poll_loop(self) -> None:
         while True:
             try:
-                await self._epic_party_poll()
+                since_full = time.time() - self._epic_party_last_full_poll
+                if (not self.websocket.connected
+                        or since_full >= self.epic_party_user_poll_interval):
+                    await self._epic_party_poll()
+                elif (self.is_ready()
+                        and not self._epic_party_poll_in_flight
+                        and not self._reconnecting_to_party):
+                    await self.epic_party_keep_alive()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -4119,6 +4134,7 @@ class Client(BasicClient):
             return
 
         self._epic_party_poll_in_flight = True
+        self._epic_party_last_full_poll = time.time()
         try:
             await self.epic_party_keep_alive()
 
@@ -4144,7 +4160,8 @@ class Client(BasicClient):
 
             if not current and local_epic_party_id:
                 self._epic_party_missing_current_count += 1
-                if self._epic_party_missing_current_count >= 3:
+                needed = 2 if self.websocket.connected else 3
+                if self._epic_party_missing_current_count >= needed:
                     self._epic_party_missing_current_count = 0
                     await self.recreate_party_after_epic_disband(
                         'poll-stale-eos', local_epic_party_id

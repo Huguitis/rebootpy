@@ -38,6 +38,8 @@ if TYPE_CHECKING:
     from .friend import Friend
     from .party import ClientParty
 
+_UNSET = object()
+
 
 class PresenceGameplayStats:
     """Represents gameplaystats received from presence.
@@ -300,10 +302,12 @@ class Presence:
 
     __slots__ = ('client', 'raw', 'away', 'friend', 'platform',
                  'received_at', 'status', 'joinable', 'invitable',
-                 'session_id', 'has_properties', 'homebase_rating', 'lfg',
+                 'session_id', 'has_properties', 'lfg',
                  'sub_game', 'in_unjoinable_match', 'playlist', 'party_size',
                  'max_party_size', 'server_player_count',
-                 'gameplay_stats', 'party', 'island_code')
+                 'party', 'island_code', '_basic_info_raw',
+                 '_homebase_rating', '_gameplay_stats_raw',
+                 '_gameplay_stats', '_players_alive')
 
     def __init__(
         self,
@@ -359,8 +363,8 @@ class Presence:
 
         self.session_id = raw_properties.get('SessionIdAttributeKey') or None
 
-        _basic_info = json.loads(raw_properties.get('FortBasicInfo', '{}'))
-        self.homebase_rating = _basic_info.get('homeBaseRating')
+        self._basic_info_raw = raw_properties.get('FortBasicInfo')
+        self._homebase_rating = _UNSET
 
         if raw_properties.get('FortLFG') is None:
             self.lfg = None
@@ -399,15 +403,9 @@ class Presence:
         if self.server_player_count is not None:
             self.server_player_count = int(self.server_player_count)
 
-        if 'FortGameplayStats' in raw_properties:
-            self.gameplay_stats = PresenceGameplayStats(
-                self.friend,
-                json.loads(raw_properties['FortGameplayStats']),
-                players_alive,
-                self.playlist
-            )
-        else:
-            self.gameplay_stats = None
+        self._gameplay_stats_raw = raw_properties.get('FortGameplayStats')
+        self._players_alive = players_alive
+        self._gameplay_stats = _UNSET
 
         eos_party = private_data.get('party') or {}
         key = "party.joininfodata.286331153"
@@ -425,6 +423,27 @@ class Presence:
 
         self.joinable = eos_party.get('joinable', legacy_joinable)
         self.invitable = eos_party.get('invitable')
+
+    @property
+    def homebase_rating(self) -> Optional[int]:
+        if self._homebase_rating is _UNSET:
+            info = json.loads(self._basic_info_raw or '{}')
+            self._homebase_rating = info.get('homeBaseRating')
+        return self._homebase_rating
+
+    @property
+    def gameplay_stats(self) -> Optional['PresenceGameplayStats']:
+        if self._gameplay_stats is _UNSET:
+            raw = self._gameplay_stats_raw
+            self._gameplay_stats = None if raw is None else (
+                PresenceGameplayStats(
+                    self.friend,
+                    json.loads(raw),
+                    self._players_alive,
+                    self.playlist,
+                )
+            )
+        return self._gameplay_stats
 
     @property
     def available(self) -> bool:

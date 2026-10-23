@@ -331,10 +331,10 @@ class Auth:
         reauth_lock.priority += 1
         forced = reauth_lock.locked()
 
-        try:
-            if not forced:
-                await self._refresh_lock.acquire()
+        if not forced:
+            await self._refresh_lock.acquire()
 
+        try:
             log.debug('Refreshing session')
             self.client._refresh_times.append(time.time())
 

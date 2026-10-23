@@ -53,6 +53,17 @@ class FriendBase(UserBase):
         self._direction = data['direction']
         self._created_at = from_iso(data['created'])
 
+    def _update_external_auths(self, external_auths, *,
+                               extra_external_auths=None) -> None:
+        iterator = (external_auths.values()
+                    if isinstance(external_auths, dict) else external_auths)
+        name = None
+        for e in iterator or []:
+            if (e.get('type') or '').lower() != 'twitch':
+                name = e.get('externalDisplayName')
+        self._external_display_name = name
+        self._external_auths = []
+
     @property
     def status(self) -> str:
         """:class:`str`: The friends status to the client. E.g. if the friend

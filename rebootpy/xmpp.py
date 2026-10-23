@@ -42,7 +42,7 @@ from .party import (Party, PartyJoinRequest, ReceivedPartyInvitation,
                     PartyJoinConfirmation)
 from .presence import Presence
 from .enums import AwayStatus
-from .utils import to_iso, from_iso, describe_connect_error
+from .utils import to_iso, from_iso, describe_connect_error, json_loads, spawn
 
 if TYPE_CHECKING:
     from .client import Client
@@ -92,9 +92,9 @@ class EventDispatcher:
     def process_presence(cls, client, *args) -> None:
         for coro in cls.presence_listeners:
             if __name__ == coro.__module__:
-                asyncio.ensure_future(coro(client.xmpp, *args))
+                spawn(coro(client.xmpp, *args))
             else:
-                asyncio.ensure_future(coro(*args))
+                spawn(coro(*args))
 
     @classmethod
     def presence(cls) -> Awaitable:
@@ -116,7 +116,7 @@ class EventDispatcher:
 
     @classmethod
     def process_event(cls, client: 'Client', raw_body: dict) -> None:
-        body = json.loads(raw_body)
+        body = json_loads(raw_body)
 
         type_ = body.get('type')
         if type_ is None:
@@ -132,9 +132,9 @@ class EventDispatcher:
             ctx = EventContext(client, body)
 
             if __name__ == coro.__module__:
-                asyncio.ensure_future(coro(client.xmpp, ctx))
+                spawn(coro(client.xmpp, ctx))
             else:
-                asyncio.ensure_future(coro(ctx))
+                spawn(coro(ctx))
 
     @classmethod
     def event(cls, event: str) -> Awaitable:
@@ -273,6 +273,8 @@ class XMPPClient:
 
         self.stanza = "<presence/>"
         self.status = ""
+        self._stanza_changed = asyncio.Event()
+        self._restart_task = None
 
     @property
     def resource(self) -> str:
@@ -369,7 +371,7 @@ class XMPPClient:
             # required to do by the server (or at least thats what
             # i suspect)
             if self.send_presence_on_add:
-                self.client.loop.create_task(self.send_presence(
+                spawn(self.send_presence(
                     to=f.jid,
                     status=self.client.party.last_raw_status,
                     show=self.client.away.value
@@ -1041,9 +1043,7 @@ class XMPPClient:
                     )
 
                     if self.client.auto_update_status:
-                        self.client.loop.create_task(
-                            self.client.auto_update_status_text()
-                        )
+                        spawn(self.client.auto_update_status_text())
 
     @EventDispatcher.event('com.epicgames.social.party.notification.v0.MEMBER_REQUIRE_CONFIRMATION')  # noqa
     async def event_party_member_require_confirmation(self,
@@ -1253,24 +1253,25 @@ class XMPPClient:
     #     client.on_stream_suspended.connect(self.on_stream_suspended)
     #     client.on_stream_destroyed.connect(self.on_stream_destroyed)
 
-    async def ping_watchdog(self) -> None:
-        while self._connected:
-            log.debug(f'last pong: {self._last_pong}')
-            if (
-                self._last_pong is not None and
-                datetime.datetime.now(datetime.timezone.utc) - self._last_pong
-                > datetime.timedelta(seconds=20)
-            ):
-                log.debug(
-                    'No ping response in 20 second, '
-                    'assuming dead connection and restarting.'
-                )
-                await self.restart()
+    async def close(self) -> None:
+        task = self._restart_task
+        self._restart_task = None
+        if (task is not None and not task.done()
+                and task is not asyncio.current_task()):
+            task.cancel()
+        await self._close()
 
-            await asyncio.sleep(5)
+    def _request_restart(self) -> None:
+        if (self._restarting or self.client._closing
+                or self.client.is_closed()):
+            return
+        task = self._restart_task
+        if task is not None and not task.done():
+            return
+        self._restart_task = self.client.loop.create_task(self.restart())
 
     async def xmpp_send(self, data: str) -> None:
-        if self.websocket.closed:
+        if self.websocket is None or self.websocket.closed:
             raise ConnectionError("Attempted to write to closed websocket.")
 
         try:
@@ -1280,26 +1281,35 @@ class XMPPClient:
             )
         except asyncio.TimeoutError:
             log.debug('XMPP send timed out, restarting now...')
-            await self.restart()
+            self._request_restart()
         except aiohttp.client_exceptions.ClientConnectionResetError:
             log.debug('Disconnected from websocket, restarting now...')
-            await self.restart()
+            self._request_restart()
         except Exception as e:
-            log.debug(f'Unknown XMPP send error: {e}')
+            log.debug('Unknown XMPP send error: %s', e)
             raise
 
     async def loop_ping(self) -> None:
+        self._last_pong = datetime.datetime.now(datetime.timezone.utc)
         while self._connected:
-            log.debug('Sending XMPP ping')
+            if (datetime.datetime.now(datetime.timezone.utc) - self._last_pong
+                    > datetime.timedelta(seconds=20)):
+                log.debug(
+                    'No ping response in 20 second, '
+                    'assuming dead connection and restarting.'
+                )
+                self._request_restart()
+                return
+
             await self.xmpp_send(
                 "<iq type='get' id='ping'><ping xmlns='urn:xmpp:ping'/></iq>"
             )
-            log.debug('Sent XMPP ping')
             await asyncio.sleep(10)
 
     async def parse_message(self, raw: str) -> None:
         # if '<presence' not in raw:
-        log.debug(f'Received websocket message - {raw}')
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug('Received websocket message - %s', raw)
 
         if "<stream:features" in raw and not self._authed:
             sasl_msg = base64.b64encode(
@@ -1331,9 +1341,6 @@ class XMPPClient:
                 "<iq type='set' id='sess_1'><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></iq>"
             )
             self._ping_task = self.client.loop.create_task(self.loop_ping())
-            self._watchdog_task = self.client.loop.create_task(
-                self.ping_watchdog()
-            )
             self._presence_task = self.client.loop.create_task(
                 self.presence_manager()
             )
@@ -1343,7 +1350,6 @@ class XMPPClient:
         elif 'type="result"' in raw and 'id="ping"' in raw:
             self._last_pong = datetime.datetime.now(datetime.timezone.utc)
             self.client.dispatch_event('internal_xmpp_session_pong')
-            log.debug(f'Received XMPP pong')
         else:
             ret = self.xml_processor.process(raw)
 
@@ -1360,53 +1366,53 @@ class XMPPClient:
                 if type_ == "message":
                     EventDispatcher.process_event(self.client, *ret[1])
                 else:
-                    log(f"Unhandled XML type: {type_}")
+                    log.debug('Unhandled XML type: %s', type_)
 
     async def presence_manager(self) -> None:
         stanza = ""
         while self._connected:
             if self.stanza != stanza:
-                await self.xmpp_send(self.stanza)
-                await self.client.send_eos_presence()
                 stanza = self.stanza
+                await self.xmpp_send(stanza)
+                await self.client.send_eos_presence()
+            self._stanza_changed.clear()
+            if self.stanza == stanza:
+                await self._stanza_changed.wait()
             await asyncio.sleep(1)
 
     async def connect_to_xmpp(self) -> None:
         log.debug('Attempting to connect to XMPP...')
-        while True:
-            try:
-                async with self.http_session.ws_connect(
-                    "wss://xmpp-service-prod.ol.epicgames.com",
-                    headers={
-                        "Authorization": f"Bearer {self.client.auth.ios_access_token}",
-                        "Sec-WebSocket-Protocol": "xmpp"
-                    },
-                ) as websocket:
-                    self.websocket = websocket
-                    self._connected = True
+        was_ready = False
+        try:
+            async with self.http_session.ws_connect(
+                "wss://xmpp-service-prod.ol.epicgames.com",
+                headers={
+                    "Authorization": f"Bearer {self.client.auth.ios_access_token}",
+                    "Sec-WebSocket-Protocol": "xmpp"
+                },
+            ) as websocket:
+                self.websocket = websocket
+                self._connected = True
 
-                    await self.xmpp_send(
-                        "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='prod.ol.epicgames.com' version='1.0' />"
-                    )
-
-                    async for msg in websocket:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            await self.parse_message(msg.data)
-            except aiohttp.client_exceptions.ClientConnectorDNSError:
-                log.debug(
-                    'DNS error when attempting to connect to XMPP, '
-                    'retrying in 5 seconds..'
+                await self.xmpp_send(
+                    "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='prod.ol.epicgames.com' version='1.0' />"
                 )
-                await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                log.debug("XMPP connect task cancelled")
-                return
-            except RuntimeError:
-                if self.http_session.closed:
-                    log.debug('aiohttp session closed, restarting now...')
-                    await self.restart()
-            finally:
+
+                async for msg in websocket:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            await self.parse_message(msg.data)
+                        except Exception:
+                            log.exception('Failed to handle an XMPP message')
+                    was_ready = was_ready or self._ready
+        finally:
+            was_ready = was_ready or self._ready
+            if self._xmpp_task is asyncio.current_task():
+                self._xmpp_task = None
                 await self._close(close_http=False)
+                if was_ready and not self.client._closing:
+                    log.debug('XMPP connection lost, reconnecting')
+                    self.client._schedule_xmpp_reconnect()
 
     async def run(self) -> None:
         if self._xmpp_task and not self._xmpp_task.done():
@@ -1485,6 +1491,7 @@ class XMPPClient:
         self._authed = False
         self._xmpp_ready_event.clear()
 
+        current = asyncio.current_task()
         tasks = [
             self._presence_task,
             self._ping_task,
@@ -1492,7 +1499,7 @@ class XMPPClient:
             self._xmpp_task
         ]
         for task in tasks:
-            if task:
+            if task and task is not current:
                 task.cancel()
 
         self._presence_task = None
@@ -1523,6 +1530,7 @@ class XMPPClient:
     def set_presence(self, *,
                      status: Optional[Union[str, dict]] = None,
                      show: Optional[str]) -> None:
+        self._stanza_changed.set()
         if status is None:
             self.stanza = "<presence/>"
         else:
