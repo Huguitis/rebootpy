@@ -2649,8 +2649,11 @@ class ClientPartyMember(PartyMemberBase, Patchable):
                 for i in range(0, len(items), 30):
                     await self.patch(updated=dict(items[i:i + 30]))
             except HTTPException as exc:
-                m = 'errors.com.epicgames.social.party.party_not_found'
-                if exc.message_code != m:
+                gone = (
+                    'errors.com.epicgames.social.party.party_not_found',
+                    'errors.com.epicgames.social.party.member_not_found',
+                )
+                if exc.message_code not in gone:
                     raise
 
         spawn(patcher())

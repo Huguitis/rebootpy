@@ -315,14 +315,17 @@ class Auth:
 
         while True:
             self._refresh_event.clear()
-            _, p = await asyncio.wait((
+            waiters = (
                 loop.create_task(self._refresh_event.wait()),
                 loop.create_task(self.schedule_token_refresh())
-            ), return_when=asyncio.FIRST_COMPLETED)
-
-            for pending in p:
-                if not pending.cancelled():
-                    pending.cancel()
+            )
+            try:
+                await asyncio.wait(waiters,
+                                   return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in waiters:
+                    if not waiter.done():
+                        waiter.cancel()
 
             await self.do_refresh()
 
