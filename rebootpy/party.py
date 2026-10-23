@@ -2708,6 +2708,7 @@ class ClientPartyMember(PartyMemberBase, Patchable):
             playlist=playlist,
             version=version
         )
+        self.party.update_presence()
 
         if not self.edit_lock.locked():
             return await self.patch(updated=prop)

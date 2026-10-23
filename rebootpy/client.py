@@ -3727,6 +3727,13 @@ class Client(BasicClient):
         })
         social_status_json = json.dumps({'attendingSocialEventIds': []})
 
+        island_code = 'experience_br'
+        if self.party:
+            try:
+                island_code = self.party.playlist_info[0] or island_code
+            except Exception:
+                pass
+
         join_data = {'bIsPrivate': True}
         if self.party:
             privacy = party_privacy or self.party.config['privacy']
@@ -3759,7 +3766,7 @@ class Client(BasicClient):
                 'FortLFG': 'i0',
                 'FortPartySize': f'i{party_size}',
                 'FortSubGame': 'i1',
-                'IslandCode': 'sexperience_br',
+                'IslandCode': f's{island_code}',
                 'IsInZone': 'bfalse',
                 'FortGameplayStats': f'm{gameplay_stats_json}',
                 'SocialStatus': f'm{social_status_json}',
